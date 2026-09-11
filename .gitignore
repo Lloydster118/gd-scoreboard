@@ -1,21 +1,7 @@
-# Data — never commit real transaction exports
-*.csv
-*.xlsx
-data/
-attachments/
-
-# Real roster with actual employee names — never commit
-src/roster_local.py
-
-# Python
 __pycache__/
 *.pyc
 .venv/
-venv/
-.env
-.ipynb_checkpoints/
-
-# OS / editor
-.DS_Store
-.idea/
-.vscode/
+data/
+src/roster_local.py
+.streamlit/secrets.toml
+*.log

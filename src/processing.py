@@ -184,12 +184,11 @@ def _points_for_row(row) -> int:
 def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
     """Combine all weekly boards into the £50 overall standings.
 
-    Score = mean(points) over QUALIFIED weeks only. Weeks with 'No recorded shift'
-    are treated as N/A and excluded from the denominator. Servers must have
-    at least MIN_QUALIFIED_WEEKS to be eligible for the overall prize.
+    Score = total(points) across ALL 5 weeks, divided by 5 (the full campaign).
+    Weeks with no recorded shift OR below the table threshold count as 0 points
+    — absence is not N/A. There is no minimum-weeks gate: whoever posts the
+    highest average across the 5 weeks wins the £50.
     """
-    from .config import MIN_QUALIFIED_WEEKS
-
     rows: list[dict] = []
     for w in WEEKS:
         board = weekly_leaderboard(sales, w)
@@ -203,36 +202,39 @@ def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
                 "conversion_pct": r["conversion_pct"],
             })
     long = pd.DataFrame(rows)
+
+    # Ensure every roster member has a row for every week (0 points if absent).
+    seen = set(zip(long.get("Employee", []), long.get("week", []))) if not long.empty else set()
+    extra = []
+    for name, disp in ELIGIBLE_ROSTER.items():
+        for w in WEEKS:
+            if (name, w.number) not in seen:
+                extra.append({
+                    "week": w.number, "Employee": name, "Display": disp,
+                    "status": "No recorded shift", "points": 0, "conversion_pct": 0,
+                })
+    if extra:
+        long = pd.concat([long, pd.DataFrame(extra)], ignore_index=True) if not long.empty else pd.DataFrame(extra)
+
     if long.empty:
         return long
 
-    # Ensure every roster member appears even if never active.
-    for name, disp in ELIGIBLE_ROSTER.items():
-        if not ((long["Employee"] == name).any()):
-            for w in WEEKS:
-                long.loc[len(long)] = {
-                    "week": w.number, "Employee": name, "Display": disp,
-                    "status": "No recorded shift", "points": 0, "conversion_pct": 0,
-                }
-
-    qualified = long[long["status"] == "Qualified"]
+    total_weeks = len(WEEKS)
     agg = (
-        qualified.groupby(["Employee", "Display"], as_index=False)
-        .agg(qualified_weeks=("week", "nunique"),
+        long.groupby(["Employee", "Display"], as_index=False)
+        .agg(qualified_weeks=("status", lambda s: (s == "Qualified").sum()),
+             weeks_worked=("status", lambda s: (s != "No recorded shift").sum()),
              total_points=("points", "sum"),
-             avg_points=("points", "mean"),
              avg_conversion_pct=("conversion_pct", "mean"))
     )
-    # Add roster members with 0 qualified weeks.
-    all_disp = pd.DataFrame(
-        [{"Employee": n, "Display": d} for n, d in ELIGIBLE_ROSTER.items()]
-    )
-    agg = all_disp.merge(agg, on=["Employee", "Display"], how="left").fillna(
-        {"qualified_weeks": 0, "total_points": 0, "avg_points": 0, "avg_conversion_pct": 0}
-    )
-    agg["prize_eligible"] = agg["qualified_weeks"] >= MIN_QUALIFIED_WEEKS
+    # Average is total points divided by the full 5-week campaign, not just
+    # weeks worked. Absence = 0, exactly as the rules now state.
+    agg["avg_points"] = agg["total_points"] / total_weeks
+
+    # Everyone in the roster is prize-eligible; no minimum-weeks gate.
+    agg["prize_eligible"] = True
     agg = agg.sort_values(
-        ["prize_eligible", "avg_points", "avg_conversion_pct"],
+        ["avg_points", "avg_conversion_pct", "total_points"],
         ascending=[False, False, False],
     ).reset_index(drop=True)
     return agg

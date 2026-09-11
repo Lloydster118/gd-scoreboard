@@ -1,19 +1,20 @@
 """
-George & Dragon — Upsell Incentive Live Scoreboard
-==================================================
+George & Dragon — Floor Team Upsell Incentive Scoreboard
+=========================================================
 
-A single-page Streamlit dashboard for the 5-week floor-team upselling
-incentive. Upload a Zonal Detailed Transaction Report; the app filters
-to the eligible floor roster, classifies items into weekly themes,
-computes fair table-conversion rates, and renders both the current
-week's £10 leaderboard and the rolling £50 overall standings.
+Public-facing scoreboard for the 5-week floor-team upselling incentive.
+Anyone with the link can view the leaderboard, rules, and how-it-works.
+Only the supervisor (with the admin PIN) can upload new Zonal data.
 
-Data is processed in-session only. Nothing is persisted server-side.
+Data is stored server-side as CSV in ./data/ so uploads persist between
+visits. Future weeks auto-lock until their Monday.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import io
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -23,7 +24,6 @@ from src.config import (
     WEEKS,
     ELIGIBLE_ROSTER,
     MIN_TABLES_WEEKLY,
-    MIN_QUALIFIED_WEEKS,
     PRIZE_WEEKLY_GBP,
     PRIZE_OVERALL_GBP,
     RANK_POINTS,
@@ -36,10 +36,23 @@ from src.processing import (
     diagnostics,
 )
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+COMBINED_CSV = DATA_DIR / "combined_transactions.csv"
+
+# Admin PIN: set via Streamlit secrets in production. Falls back to a local
+# default so the app still runs in dev. Change this in .streamlit/secrets.toml
+# on Streamlit Cloud: `admin_pin = "your-pin"`.
+ADMIN_PIN = st.secrets.get("admin_pin", "gd2026") if hasattr(st, "secrets") else "gd2026"
+
 st.set_page_config(
     page_title="G&D Upsell Scoreboard",
     page_icon="🍽️",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
 # ---------------------------------------------------------------------------
@@ -48,254 +61,462 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .main .block-container {padding-top: 2rem;}
+    .main .block-container {padding-top: 1.5rem; max-width: 1200px;}
     .kpi {background:#0e1117; padding:1rem 1.25rem; border-radius:12px;
           border:1px solid #262730;}
-    .kpi h3 {margin:0; font-size:0.85rem; color:#9ca3af; font-weight:500;}
+    .kpi h3 {margin:0; font-size:0.75rem; color:#9ca3af; font-weight:600;
+             letter-spacing:0.05em; text-transform:uppercase;}
     .kpi p  {margin:0.25rem 0 0 0; font-size:1.6rem; font-weight:700; color:#fafafa;}
-    .rank-1 {color:#f4c542; font-weight:700;}
-    .status-qualified {color:#22c55e;}
-    .status-building {color:#eab308;}
-    .status-none {color:#6b7280;}
+    .locked-card {background:#0e1117; padding:1.5rem; border-radius:12px;
+                  border:1px dashed #374151; text-align:center; color:#6b7280;}
+    .rule-card {background:#0e1117; padding:1.25rem 1.5rem; border-radius:12px;
+                border:1px solid #262730; margin-bottom:0.75rem;}
+    .rule-card h4 {margin:0 0 0.5rem 0; color:#fafafa;}
+    .rule-card p {margin:0; color:#9ca3af; font-size:0.95rem;}
+    .prize-hero {background:linear-gradient(135deg,#1e293b,#0f172a);
+                 padding:2rem; border-radius:16px; border:1px solid #334155;
+                 text-align:center;}
+    .prize-hero h2 {margin:0 0 0.5rem 0; color:#fbbf24;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — data source & week selector
+# Helpers
 # ---------------------------------------------------------------------------
-st.sidebar.title("🍽️ G&D Scoreboard")
-st.sidebar.caption(f"5-week upselling incentive — £{PRIZE_WEEKLY_GBP} weekly / £{PRIZE_OVERALL_GBP} overall")
+def load_persisted_data() -> pd.DataFrame | None:
+    """Load the combined CSV that survives across visits."""
+    if not COMBINED_CSV.exists():
+        return None
+    try:
+        return load_transactions(COMBINED_CSV)
+    except Exception:
+        return None
 
-upload = st.sidebar.file_uploader(
-    "Upload Zonal Detailed Transaction Report (.csv)",
-    type=["csv"],
-    accept_multiple_files=False,
-)
 
-use_sample = st.sidebar.toggle("Use pre-loaded pre-promo baseline (dev)", value=False,
-                               help="Only works locally when the source CSV is available.")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Roster (competition entrants):**")
-for zonal, disp in ELIGIBLE_ROSTER.items():
-    st.sidebar.markdown(f"- {disp} _(Zonal: `{zonal}`)_")
-st.sidebar.markdown("- Paige _(new starter — add Zonal name when active)_")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    f"**Rules**\n\n"
-    f"- Min {MIN_TABLES_WEEKLY} eligible tables/week to win £{PRIZE_WEEKLY_GBP}.\n"
-    f"- Min {MIN_QUALIFIED_WEEKS} qualified weeks to win £{PRIZE_OVERALL_GBP}.\n"
-    f"- Absence = N/A, not zero.\n"
-    f"- Score = tables that bought target item ÷ eligible tables served."
-)
-
-# ---------------------------------------------------------------------------
-# Load data
-# ---------------------------------------------------------------------------
-df_raw = None
-if upload is not None:
-    df_raw = load_transactions(upload)
-elif use_sample:
-    p = Path("/home/user/workspace/branched_contexts/a7f3e32e-e844-480e-8908-726ddd7ec370/"
-             "attachments/Detailed-Transaction-Report-5-week-pre-promo_"
-             "Detailed-Transaction-Report_Detailed-Transaction.csv")
-    if p.exists():
-        df_raw = load_transactions(p)
+def append_upload(new_df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Merge a new upload into the persisted store. Dedupes on all columns."""
+    if COMBINED_CSV.exists():
+        existing = pd.read_csv(COMBINED_CSV, low_memory=False)
+        combined = pd.concat([existing, new_df_raw], ignore_index=True)
     else:
-        st.sidebar.warning("Sample CSV not found in this environment.")
+        combined = new_df_raw.copy()
+    # Dedupe: identical rows (same order line, same date, same everything) collapse.
+    combined = combined.drop_duplicates()
+    combined.to_csv(COMBINED_CSV, index=False)
+    return combined
 
-if df_raw is None:
-    st.title("George & Dragon — Upsell Incentive Scoreboard")
-    st.info("👈 Upload the latest Zonal export in the sidebar to see the live scoreboard.")
+
+def week_status(week, today: dt.date) -> str:
+    """One of: 'locked' (future), 'live' (current), 'closed' (past)."""
+    if today < week.start:
+        return "locked"
+    if today > week.end:
+        return "closed"
+    return "live"
+
+
+def current_or_next_week(today: dt.date):
+    for w in WEEKS:
+        if w.start <= today <= w.end:
+            return w
+    # If we're before the campaign, return week 1; if after, return last week.
+    if today < WEEKS[0].start:
+        return WEEKS[0]
+    return WEEKS[-1]
+
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+st.title("🍽️ George & Dragon — Upsell Scoreboard")
+st.caption("Marlow · Floor Team · 5-Week Upsell Incentive")
+
+# ---------------------------------------------------------------------------
+# Navigation (top-level tabs, no sidebar for viewers)
+# ---------------------------------------------------------------------------
+tab_leaderboard, tab_weeks, tab_rules, tab_how, tab_admin = st.tabs([
+    "🏆 Leaderboard",
+    "📅 5-Week View",
+    "📋 Rules",
+    "🧮 How It Works",
+    "🔒 Admin",
+])
+
+# Load persistent data once.
+df_raw = load_persisted_data()
+sales = clean_sales(df_raw) if df_raw is not None else None
+today = dt.date.today()
+current_week = current_or_next_week(today)
+
+# ---------------------------------------------------------------------------
+# TAB 1: Leaderboard (current week + overall)
+# ---------------------------------------------------------------------------
+with tab_leaderboard:
+    # Prize hero
     st.markdown(
         f"""
-        ### How it works
+        <div class="prize-hero">
+            <h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
+            <p style="color:#cbd5e1; margin:0;">
+                Highest table-conversion rate wins. Fair. Transparent. Live.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
 
-        1. Export the **Detailed Transaction Report** from Zonal covering the campaign period so far.
-        2. Drop the CSV into the uploader on the left.
-        3. The board recalculates instantly. No data is stored anywhere.
+    if sales is None or sales.empty:
+        st.info(
+            "The scoreboard will appear here once the first Zonal upload lands. "
+            "Ask Harry when the first drop is going in."
+        )
+    else:
+        # KPI row
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            week_label = f"Week {current_week.number}"
+            if today < WEEKS[0].start:
+                week_label = "Campaign starts " + WEEKS[0].start.strftime("%d %b")
+            elif today > WEEKS[-1].end:
+                week_label = "Campaign closed"
+            st.markdown(
+                f'<div class="kpi"><h3>Now</h3><p>{week_label}</p></div>',
+                unsafe_allow_html=True,
+            )
+        with k2:
+            st.markdown(
+                f'<div class="kpi"><h3>This week\'s theme</h3>'
+                f'<p style="font-size:1.05rem">{current_week.name}</p></div>',
+                unsafe_allow_html=True,
+            )
+        with k3:
+            st.markdown(
+                f'<div class="kpi"><h3>Weekly prize</h3><p>£{PRIZE_WEEKLY_GBP}</p></div>',
+                unsafe_allow_html=True,
+            )
+        with k4:
+            st.markdown(
+                f'<div class="kpi"><h3>Overall prize</h3><p>£{PRIZE_OVERALL_GBP}</p></div>',
+                unsafe_allow_html=True,
+            )
 
-        ### What's measured
+        st.markdown("---")
 
-        For each of the {len(WEEKS)} weekly themes:
+        # This week's leaderboard (only if week is live or closed, not locked)
+        status = week_status(current_week, today)
+        st.subheader(f"This week — {current_week.name}")
 
-        - Only genuine `Sale` lines for the {len(ELIGIBLE_ROSTER)} eligible floor-team members are counted.
-        - Every unique order/table for a server is one **opportunity**.
-        - A table counts as a **hit** if it bought one or more of that week's target items.
-        - Weekly rank = **conversion % = hits / opportunities**.
-        - £{PRIZE_WEEKLY_GBP} weekly winner requires ≥ {MIN_TABLES_WEEKLY} eligible tables.
-        - £{PRIZE_OVERALL_GBP} overall winner = highest **average points** across ≥ {MIN_QUALIFIED_WEEKS} qualified weeks.
-        - Weeks with no recorded shift are marked **N/A** and excluded from the average — nobody is penalised for approved absence.
+        if status == "locked":
+            st.info(f"Week {current_week.number} unlocks on {current_week.start.strftime('%A %d %B')}.")
+        else:
+            board = weekly_leaderboard(sales, current_week)
+            if board.empty:
+                st.info("No activity recorded in this week's data yet.")
+            else:
+                _render_weekly_board = None  # placeholder
+                display_board = board[[
+                    "rank", "Display", "eligible_tables", "tables_with_target",
+                    "conversion_pct", "target_revenue", "status",
+                ]].rename(columns={
+                    "rank": "#",
+                    "Display": "Server",
+                    "eligible_tables": "Tables",
+                    "tables_with_target": "Hits",
+                    "conversion_pct": "Conversion %",
+                    "target_revenue": "Revenue £",
+                    "status": "Status",
+                })
+                styled = (
+                    display_board.style
+                    .format({"Conversion %": "{:.1f}%", "Revenue £": "£{:.2f}",
+                             "#": "{:.0f}"}, na_rep="—")
+                    .background_gradient(subset=["Conversion %"], cmap="Greens")
+                )
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                qualified = board[board["status"] == "Qualified"]
+                if not qualified.empty:
+                    top = qualified.iloc[0]
+                    st.success(
+                        f"🥇 Leading this week: **{top['Display']}** — "
+                        f"{top['conversion_pct']:.1f}% conversion "
+                        f"({int(top['tables_with_target'])} of {int(top['eligible_tables'])} tables)."
+                    )
+                else:
+                    st.warning(
+                        f"No server has hit the {MIN_TABLES_WEEKLY}-table threshold yet — "
+                        "leaderboard is provisional."
+                    )
+
+        st.markdown("---")
+
+        # Overall standings
+        st.subheader(f"Overall standings — £{PRIZE_OVERALL_GBP} campaign prize")
+        st.caption(
+            "Average points per week across the 5-week campaign. "
+            "Missed weeks count as zero. No minimum-weeks gate."
+        )
+        overall = overall_leaderboard(sales)
+        if overall.empty:
+            st.info("Standings will populate as weeks close.")
+        else:
+            show = overall.rename(columns={
+                "Display": "Server",
+                "qualified_weeks": "Qualified weeks",
+                "weeks_worked": "Weeks worked",
+                "total_points": "Total pts",
+                "avg_points": "Avg pts / week",
+                "avg_conversion_pct": "Avg conversion %",
+            })[["Server", "Weeks worked", "Qualified weeks",
+                "Total pts", "Avg pts / week", "Avg conversion %"]]
+            styled = (
+                show.style
+                .format({"Avg pts / week": "{:.1f}", "Avg conversion %": "{:.1f}%",
+                         "Total pts": "{:.0f}"})
+                .background_gradient(subset=["Avg pts / week"], cmap="Blues")
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            top = overall.iloc[0]
+            st.success(
+                f"🏆 Provisional overall leader: **{top['Display']}** — "
+                f"avg {top['avg_points']:.1f} pts/week across the campaign."
+            )
+
+# ---------------------------------------------------------------------------
+# TAB 2: 5-Week View (with locked future weeks)
+# ---------------------------------------------------------------------------
+with tab_weeks:
+    st.subheader("The 5-week campaign at a glance")
+    st.caption("Each week unlocks on its Monday. Weekly winner = highest conversion % (min 15 tables).")
+
+    for w in WEEKS:
+        status = week_status(w, today)
+
+        with st.container():
+            cols = st.columns([1, 4, 1])
+            with cols[0]:
+                icon = {"locked": "🔒", "live": "🟢", "closed": "✅"}[status]
+                st.markdown(f"### {icon} Week {w.number}")
+                st.caption(f"{w.start.strftime('%a %d %b')} → {w.end.strftime('%a %d %b')}")
+            with cols[1]:
+                st.markdown(f"**{w.name}**")
+                if status == "locked":
+                    st.markdown(
+                        f'<div class="locked-card">Unlocks {w.start.strftime("%A %d %B")} — items revealed on the day.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.caption("Target items: " + ", ".join(w.items))
+            with cols[2]:
+                if status == "locked":
+                    st.markdown("`Locked`")
+                elif status == "live":
+                    st.markdown("**Live now**")
+                else:
+                    st.markdown("Closed")
+
+            # Board only if unlocked and we have data
+            if status != "locked" and sales is not None and not sales.empty:
+                board = weekly_leaderboard(sales, w)
+                if not board.empty:
+                    top3 = board.head(3)[["rank", "Display", "conversion_pct",
+                                          "tables_with_target", "eligible_tables", "status"]]
+                    top3 = top3.rename(columns={
+                        "rank": "#", "Display": "Server",
+                        "conversion_pct": "Conv %",
+                        "tables_with_target": "Hits",
+                        "eligible_tables": "Tables",
+                        "status": "Status",
+                    })
+                    st.dataframe(
+                        top3.style.format({"Conv %": "{:.1f}%", "#": "{:.0f}"}, na_rep="—"),
+                        use_container_width=True, hide_index=True,
+                    )
+            st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# TAB 3: Rules
+# ---------------------------------------------------------------------------
+with tab_rules:
+    st.subheader("The rules — read once, ask if unclear")
+
+    st.markdown(
+        f"""
+        <div class="rule-card">
+            <h4>£{PRIZE_WEEKLY_GBP} weekly prize</h4>
+            <p>Awarded to the server with the <b>highest table-conversion rate</b> in a given week.
+            Minimum <b>{MIN_TABLES_WEEKLY} eligible tables</b> served that week to qualify —
+            this stops one lucky big-spend table skewing a small sample.</p>
+        </div>
+        <div class="rule-card">
+            <h4>£{PRIZE_OVERALL_GBP} overall prize</h4>
+            <p>Awarded at the end of the 5 weeks to the server with the <b>highest average points per week</b>
+            across the whole campaign. No minimum-weeks requirement — whatever you work, you work.
+            Missed or below-threshold weeks count as <b>0 points</b> in the average, not N/A.</p>
+        </div>
+        <div class="rule-card">
+            <h4>What counts as a "hit"</h4>
+            <p>Each week has a theme (nibbles, starters, sides, desserts, coffees & digestives).
+            A table counts as a hit if it orders <b>one or more</b> of that week's target items.
+            Two hits on one table still counts as one — we're measuring whether you <b>created the opportunity</b>,
+            not upselling volume per table.</p>
+        </div>
+        <div class="rule-card">
+            <h4>Conversion rate = fairness</h4>
+            <p>Conversion % = (tables with a hit) ÷ (eligible tables you served) × 100.
+            A part-timer with 20 tables and 8 hits (40%) beats a full-timer with 60 tables and 18 hits (30%).
+            Time on the floor doesn't win — technique does.</p>
+        </div>
+        <div class="rule-card">
+            <h4>What's excluded</h4>
+            <p>Voids, wastage, staff meals, payments-only lines, zero-cover orders (breakfast/rooms), and
+            any employee not on the competition roster. Only genuine sales to genuine restaurant covers count.</p>
+        </div>
+        <div class="rule-card">
+            <h4>Weekly ranking points (feeds the overall)</h4>
+            <p>1st = 80 · 2nd = 70 · 3rd = 60 · 4th = 50 · 5th = 40 · 6th = 30 · 7th = 20 · 8th = 10.
+            Qualified but below 8th = 10 pts. Below the {MIN_TABLES_WEEKLY}-table threshold or absent = 0.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ---------------------------------------------------------------------------
+# TAB 4: How It Works (deeper breakdown)
+# ---------------------------------------------------------------------------
+with tab_how:
+    st.subheader("How the scoreboard is calculated")
+    st.markdown(
+        """
+        ### 1. The data source
+        All numbers come from the **Zonal Detailed Transaction Report** — the same data
+        that runs the till. No manual counting, no self-reporting, no arguing with the
+        board over "I did more than that".
+
+        Harry uploads a fresh export as often as possible (daily or weekly). Each upload
+        is merged into the running store, with duplicates automatically stripped.
+
+        ### 2. Cleaning the data
+        Every raw upload gets filtered down to:
+        - **Type = "Sale"** only (no voids, no wastage, no payment-only lines)
+        - **Employees on the competition roster** only
+        - **Covers > 0** only (excludes breakfast, rooms, functions)
+
+        ### 3. Building "table opportunities"
+        Zonal has one row per menu-item line. We collapse that to one row per unique
+        `(Order No, Employee)` pair. That's a **table opportunity** — one chance to upsell.
+
+        ### 4. Counting hits
+        For each week's theme, we look at which table opportunities contain **at least one**
+        of that week's target items. A table with three Prawn Cocktails = **one hit**, not three.
+
+        ### 5. Ranking
+        ```
+        conversion % = (tables with ≥1 target item) / (eligible tables) × 100
+        ```
+        The board sorts on conversion %. Ties broken by target-item revenue.
+
+        ### 6. Weekly prize
+        Highest conversion % **among qualified servers** (≥15 eligible tables) wins the £10.
+        Below 15 tables = "Building sample" — visible on the board but not prize-eligible for that week.
+
+        ### 7. Overall prize
+        Each weekly rank gives points (1st=80 down to 8th=10). Points are summed across
+        all 5 weeks and divided by 5. Highest average wins the £50. Absence or below-threshold
+        counts as 0 — no exceptions, no adjustments.
+
+        ### 8. Why it's honest
+        - **Sample floor** stops a lucky Tuesday winning
+        - **Table-level conversion** stops volume gaming
+        - **Same data everyone sees** — Zonal, not Harry's judgement
+        - **Weeks auto-unlock** so nobody sees the board before it's fair to publish
         """
     )
-    st.stop()
 
-# ---------------------------------------------------------------------------
-# Process
-# ---------------------------------------------------------------------------
-diag = diagnostics(df_raw)
-sales = clean_sales(df_raw)
-
-# ---------------------------------------------------------------------------
-# Header + KPI row
-# ---------------------------------------------------------------------------
-st.title("George & Dragon — Upsell Incentive Scoreboard")
-st.caption(
-    f"Data range: **{diag['date_min']} → {diag['date_max']}**  ·  "
-    f"{diag['rows_total']:,} lines, {diag['sale_rows']:,} sales after cleaning."
-)
-
-k1, k2, k3, k4 = st.columns(4)
-today = dt.date.today()
-current_week = next((w for w in WEEKS if w.start <= today <= w.end), None)
-
-with k1:
-    st.markdown(f"""<div class="kpi"><h3>CURRENT WEEK</h3>
-    <p>{'Week ' + str(current_week.number) if current_week else 'Off-campaign'}</p></div>""",
-    unsafe_allow_html=True)
-with k2:
-    theme = current_week.name if current_week else "—"
-    st.markdown(f"""<div class="kpi"><h3>THEME</h3><p style="font-size:1.1rem">{theme}</p></div>""",
-    unsafe_allow_html=True)
-with k3:
-    st.markdown(f"""<div class="kpi"><h3>WEEKLY PRIZE</h3><p>£{PRIZE_WEEKLY_GBP}</p></div>""",
-    unsafe_allow_html=True)
-with k4:
-    st.markdown(f"""<div class="kpi"><h3>OVERALL PRIZE</h3><p>£{PRIZE_OVERALL_GBP}</p></div>""",
-    unsafe_allow_html=True)
-
-st.markdown("")
-
-# ---------------------------------------------------------------------------
-# Week selector
-# ---------------------------------------------------------------------------
-default_index = current_week.number - 1 if current_week else 0
-tabs = st.tabs([f"Week {w.number}" for w in WEEKS] + ["🏆 Overall (£50)"])
-
-for idx, w in enumerate(WEEKS):
-    with tabs[idx]:
-        st.subheader(f"Week {w.number} — {w.name}")
-        st.caption(f"{w.start.strftime('%a %d %b')} → {w.end.strftime('%a %d %b')}  ·  "
-                   f"Target items: {', '.join(w.items)}")
-
-        board = weekly_leaderboard(sales, w)
-
-        if board.empty:
-            st.info("No activity in this week's date range yet.")
-            continue
-
-        # KPIs for the week
-        total_tables = int(board["eligible_tables"].sum())
-        total_hits = int(board["tables_with_target"].sum())
-        overall_conv = (total_hits / total_tables * 100) if total_tables else 0
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Eligible tables served", f"{total_tables:,}")
-        c2.metric("Tables with target item", f"{total_hits:,}")
-        c3.metric("Team conversion rate", f"{overall_conv:.1f}%")
-
-        # Leaderboard table
-        display_board = board[[
-            "rank", "Display", "eligible_tables", "tables_with_target",
-            "conversion_pct", "target_units", "target_revenue", "status", "points",
-        ]].rename(columns={
-            "rank": "#",
-            "Display": "Server",
-            "eligible_tables": "Tables",
-            "tables_with_target": "Hits",
-            "conversion_pct": "Conversion %",
-            "target_units": "Units",
-            "target_revenue": "Revenue £",
-            "status": "Status",
-            "points": "Points",
-        })
-
-        def _style_status(v):
-            colors = {
-                "Qualified": "color:#22c55e;font-weight:600",
-                "Building sample": "color:#eab308;font-weight:600",
-                "No recorded shift": "color:#6b7280",
-            }
-            return colors.get(v, "")
-
-        styled = (
-            display_board.style
-            .format({"Conversion %": "{:.1f}%", "Revenue £": "£{:.2f}", "#": "{:.0f}"},
-                    na_rep="—")
-            .map(_style_status, subset=["Status"])
-            .background_gradient(subset=["Conversion %"], cmap="Greens")
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-
-        # Winner call-out
-        qualified = board[board["status"] == "Qualified"]
-        if not qualified.empty:
-            top = qualified.iloc[0]
-            st.success(
-                f"🏅 **Week {w.number} leader:** {top['Display']} — "
-                f"{top['conversion_pct']:.1f}% conversion "
-                f"({int(top['tables_with_target'])} of {int(top['eligible_tables'])} tables)."
-            )
-        else:
-            st.warning(
-                f"No server has hit the {MIN_TABLES_WEEKLY}-table threshold yet — "
-                "leaderboard is provisional."
-            )
-
-# ---------------------------------------------------------------------------
-# Overall tab
-# ---------------------------------------------------------------------------
-with tabs[-1]:
-    st.subheader(f"Overall standings — £{PRIZE_OVERALL_GBP} programme prize")
+    st.markdown("---")
     st.caption(
-        f"Score = mean weekly points across QUALIFIED weeks. "
-        f"Requires ≥ {MIN_QUALIFIED_WEEKS} qualified weeks to win. "
-        f"Weekly rank points: {RANK_POINTS}"
+        "Questions or a number that looks wrong? Grab Harry on shift — the raw data is "
+        "in the Zonal report and the calculation is above. Nothing hidden."
     )
 
-    overall = overall_leaderboard(sales)
-    if overall.empty:
-        st.info("Nothing to rank yet.")
+# ---------------------------------------------------------------------------
+# TAB 5: Admin (PIN-gated — CSV upload)
+# ---------------------------------------------------------------------------
+with tab_admin:
+    st.subheader("Admin — upload new Zonal data")
+    st.caption("PIN-protected. Only Harry uploads. Everyone else, back to the leaderboard.")
+
+    pin_input = st.text_input("Admin PIN", type="password", key="admin_pin_input")
+
+    if pin_input == "":
+        st.info("Enter the admin PIN to unlock upload.")
+    elif pin_input != ADMIN_PIN:
+        st.error("Wrong PIN.")
     else:
-        show = overall.rename(columns={
-            "Display": "Server",
-            "qualified_weeks": "Qualified weeks",
-            "total_points": "Total points",
-            "avg_points": "Avg points",
-            "avg_conversion_pct": "Avg conversion %",
-            "prize_eligible": f"Eligible for £{PRIZE_OVERALL_GBP}",
-        })[["Server", "Qualified weeks", "Total points", "Avg points",
-            "Avg conversion %", f"Eligible for £{PRIZE_OVERALL_GBP}"]]
+        st.success("Admin unlocked.")
 
-        styled = (
-            show.style
-            .format({"Avg points": "{:.1f}", "Avg conversion %": "{:.1f}%"})
-            .background_gradient(subset=["Avg points"], cmap="Blues")
+        st.markdown("### Upload Zonal Detailed Transaction Report")
+        st.caption(
+            "Same CSV format as always. Drop the day's or the week's export — "
+            "duplicates are stripped automatically. Multiple uploads accumulate."
         )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        upload = st.file_uploader(
+            "Zonal export (.csv)",
+            type=["csv"],
+            accept_multiple_files=False,
+        )
+        if upload is not None:
+            try:
+                new_raw = pd.read_csv(upload, low_memory=False)
+                combined = append_upload(new_raw)
+                st.success(
+                    f"Merged. Combined store now has {len(combined):,} rows across "
+                    f"{combined['Date'].nunique() if 'Date' in combined else '?'} unique dates."
+                )
+                st.info("Refresh the Leaderboard tab to see the new numbers.")
+            except Exception as e:
+                st.error(f"Upload failed: {e}")
 
-        eligible = overall[overall["prize_eligible"]]
-        if not eligible.empty:
-            top = eligible.iloc[0]
-            st.success(
-                f"🏆 **Provisional overall leader:** {top['Display']} — "
-                f"avg {top['avg_points']:.1f} pts across {int(top['qualified_weeks'])} qualified weeks."
-            )
+        st.markdown("---")
+        st.markdown("### Current data store")
+        if sales is None or df_raw is None:
+            st.info("No data uploaded yet.")
+        else:
+            diag = diagnostics(df_raw)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total rows", f"{diag['rows_total']:,}")
+            c2.metric("Sale rows", f"{diag['sale_rows']:,}")
+            c3.metric("Date range",
+                      f"{diag['date_min']} → {diag['date_max']}"
+                      if diag['date_min'] else "—")
+
+            if diag["unmapped_employees"]:
+                st.warning(
+                    "Sale employees NOT in the eligible roster (add to `src/config.py` "
+                    "or `src/roster_local.py` if they should be competing):"
+                )
+                st.write(diag["unmapped_employees"])
+            else:
+                st.success("All sale employees mapped to the roster.")
+
+        st.markdown("---")
+        st.markdown("### Danger zone")
+        if st.button("🗑️  Reset all uploaded data", type="secondary"):
+            if COMBINED_CSV.exists():
+                COMBINED_CSV.unlink()
+                st.success("Store wiped. Refresh to confirm.")
+            else:
+                st.info("Nothing to wipe.")
 
 # ---------------------------------------------------------------------------
-# Diagnostics
+# Footer
 # ---------------------------------------------------------------------------
-with st.expander("🔧 Diagnostics & data quality"):
-    st.json(diag, expanded=False)
-    if diag["unmapped_employees"]:
-        st.warning(
-            "The following Employee names appear in the sales data but are NOT in the "
-            "eligible roster. If any of them are competing (e.g. Paige's new profile), "
-            "add them to `src/config.py → ELIGIBLE_ROSTER`."
-        )
-        st.write(diag["unmapped_employees"])
-    else:
-        st.success("All sale employees mapped to the roster.")
+st.markdown("---")
+st.caption(
+    "George & Dragon Marlow · Heartwood Collection · "
+    "5-week upsell campaign · Numbers from Zonal · Questions to Harry"
+)

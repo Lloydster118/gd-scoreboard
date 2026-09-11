@@ -60,12 +60,12 @@ Weekly points are awarded to *qualified* servers only (≥ 20 eligible tables th
 | 8    | 10     |
 | Qualified below 8th | 10 |
 | Building sample     | 0  |
-| No recorded shift   | N/A |
+| No recorded shift   | 0  |
 
-The overall £50 winner is decided on **mean points across qualified weeks**, requiring at least
-**4 of 5** qualified weeks to be eligible. This prevents a single big week from carrying someone
-who then disappears, while also excluding N/A weeks from the denominator so approved absence
-never hurts anyone.
+The overall £50 winner is decided on **mean points across the full 5-week campaign**.
+Missed weeks and below-threshold weeks count as **0 points** (not N/A) — whatever you
+worked, you worked. There is **no minimum-weeks gate**: whoever posts the highest
+average across the campaign wins.
 
 ## Data model
 
@@ -96,10 +96,10 @@ Choices I made — and why — that you can push back on:
 |---|---|---|---|
 | Denominator | Eligible tables served | Covers, hours, shifts | Servers control tables, not who sits at them. Per-cover penalises servers assigned bigger groups; per-hour requires a manual timesheet. Tables are what Zonal actually attributes. |
 | Hit counting | Distinct tables with ≥1 target item | Total target units sold | Multi-item tables shouldn't 4× a lucky order. Measures *did you make the sell happen*, not *how big was that guest's appetite*. |
-| Small-sample rule | Hard 20-table minimum for weekly prize | Rolling z-score or Bayesian shrinkage | Legibility. The team needs to understand the rule at pre-shift. "20 tables" beats "posterior distribution". |
-| Absence handling | Exclude the week from the mean | Impute zero, or a "typical" score | Zero punishes holiday. Imputation invents data. Excluding matches how any reasonable person would grade someone who wasn't there. |
+| Small-sample rule | Hard 15-table minimum for weekly prize | Rolling z-score or Bayesian shrinkage | Legibility. The team needs to understand the rule at pre-shift. "15 tables" beats "posterior distribution". |
+| Absence handling | Missed week = 0 points in the average | Exclude the week (treat as N/A) | Simpler to explain, harder to game. Whatever you worked, you worked — no adjustments. |
 | Prize cadence | £10 weekly + £50 overall | Single £50 at the end | Weekly urgency drives daily behaviour. Overall prize rewards habit-building across all 5 themes. |
-| Overall metric | Mean points, min 4 qualified weeks | Sum of points | Sum favours whoever worked the most weeks. Mean + minimum-participation floor keeps it fair without letting anyone win off one big week. |
+| Overall metric | Mean points across full 5-week campaign | Sum of points; min-weeks gate | Mean stays comparable regardless of hours worked; no gate keeps it inclusive for shorter-week staff. |
 | Cheese Selection | Present in both Week 1 and Week 4 taxonomy | Restrict to one theme | Different selling moments (shared board vs. dessert alternative). Each active week's leaderboard is independent, so no sale is double-counted inside a single competition. |
 
 ## Repository layout

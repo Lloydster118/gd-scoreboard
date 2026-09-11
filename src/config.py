@@ -164,11 +164,14 @@ WEEKS: tuple[WeekTheme, ...] = (
 # ---------------------------------------------------------------------------
 
 # Minimum eligible tables served in a week before a server is ranked
-# for the £10 weekly prize.
-MIN_TABLES_WEEKLY: int = 20
+# for the £10 weekly prize. Lowered from 20 to 15 to open eligibility
+# to shorter-week/part-time staff while still filtering pure noise.
+MIN_TABLES_WEEKLY: int = 15
 
-# Minimum qualified weeks (out of 5) to be eligible for the £50 overall prize.
-MIN_QUALIFIED_WEEKS: int = 4
+# Overall £50 prize: no minimum-weeks gate. Whoever posts the best
+# average points across the campaign wins, however many weeks they worked.
+# (Set to 0 so old code paths still evaluate cleanly.)
+MIN_QUALIFIED_WEEKS: int = 0
 
 # Weekly ranking -> points (0-80).
 # Anyone qualified below 8th gets 10 participation points.
