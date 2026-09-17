@@ -51,15 +51,36 @@ except ImportError:
 #
 # Silently ignored outside a Streamlit runtime, in tests, or if the section
 # is absent / malformed.
+# Set by the loader below so app.py can surface *why* the override didn't
+# take effect instead of silently falling back to the example roster.
+ROSTER_SOURCE: str = "example (src/config.py)"
+ROSTER_SECRETS_ERROR: str | None = None
+
+try:
+    from .roster_local import ELIGIBLE_ROSTER as _LOCAL_ROSTER2  # type: ignore  # noqa: F401
+    ROSTER_SOURCE = "src/roster_local.py"
+except ImportError:
+    pass
+
 try:
     import streamlit as _st  # type: ignore
-    _secret_roster = _st.secrets.get("roster") if hasattr(_st, "secrets") else None
+    _secret_roster = None
+    if hasattr(_st, "secrets"):
+        # Both access styles: .get() works in newer Streamlit, subscript is
+        # the reliable path across all versions when the key exists.
+        try:
+            _secret_roster = _st.secrets["roster"]
+        except Exception:
+            _secret_roster = _st.secrets.get("roster") if hasattr(_st.secrets, "get") else None
     if _secret_roster:
-        _parsed = {str(k): str(v) for k, v in dict(_secret_roster).items()}
+        # Streamlit's Secrets object behaves like a Mapping; iterate keys
+        # directly rather than relying on dict() coercion.
+        _parsed = {str(k): str(_secret_roster[k]) for k in _secret_roster}
         if _parsed:
             ELIGIBLE_ROSTER = _parsed
-except Exception:
-    pass
+            ROSTER_SOURCE = f"Streamlit Cloud Secrets ([roster], {len(_parsed)} entries)"
+except Exception as _e:  # noqa: BLE001
+    ROSTER_SECRETS_ERROR = f"{type(_e).__name__}: {_e}"
 
 # ---------------------------------------------------------------------------
 # Transaction hygiene: only these Type values contribute to scoring.

@@ -27,6 +27,8 @@ from src.config import (
     PRIZE_WEEKLY_GBP,
     PRIZE_OVERALL_GBP,
     RANK_POINTS,
+    ROSTER_SOURCE,
+    ROSTER_SECRETS_ERROR,
 )
 from src.processing import (
     load_transactions,
@@ -480,6 +482,14 @@ with tab_admin:
                 st.info("Refresh the Leaderboard tab to see the new numbers.")
             except Exception as e:
                 st.error(f"Upload failed: {e}")
+
+        st.markdown("---")
+        st.markdown("### Roster source")
+        st.write(f"Loaded from: **{ROSTER_SOURCE}**  \u2014  {len(ELIGIBLE_ROSTER)} names")
+        if ROSTER_SECRETS_ERROR:
+            st.error(f"Streamlit Secrets error: {ROSTER_SECRETS_ERROR}")
+        with st.expander("Show loaded roster (Zonal name \u2192 display name)"):
+            st.json(dict(ELIGIBLE_ROSTER))
 
         st.markdown("---")
         st.markdown("### Current data store")
