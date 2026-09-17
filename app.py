@@ -48,7 +48,21 @@ COMBINED_CSV = DATA_DIR / "combined_transactions.csv"
 # Admin PIN: set via Streamlit secrets in production. Falls back to a local
 # default so the app still runs in dev. Change this in .streamlit/secrets.toml
 # on Streamlit Cloud: `admin_pin = "your-pin"`.
-ADMIN_PIN = st.secrets.get("admin_pin", "gd2026") if hasattr(st, "secrets") else "gd2026"
+def _load_admin_pin() -> str:
+    """Read admin PIN from Streamlit secrets, defaulting to 'gd2026'.
+
+    Never lets a missing or malformed secrets.toml crash app startup:
+    both st.secrets access and .get() can raise StreamlitSecretNotFoundError
+    if the whole file failed to parse (e.g. bad TOML in an unrelated section).
+    """
+    if not hasattr(st, "secrets"):
+        return "gd2026"
+    try:
+        return st.secrets.get("admin_pin", "gd2026")
+    except Exception:
+        return "gd2026"
+
+ADMIN_PIN = _load_admin_pin()
 
 st.set_page_config(
     page_title="G&D Upsell Scoreboard",
