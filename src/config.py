@@ -42,6 +42,25 @@ try:
 except ImportError:
     pass
 
+# Streamlit Cloud override: if a [roster] section is defined in the app's
+# Secrets, use that instead. This is how the deployed app injects real
+# employee names without exposing them in this public repo. Format:
+#
+#     [roster]
+#     "Zonal Employee Name" = "Display Name"
+#
+# Silently ignored outside a Streamlit runtime, in tests, or if the section
+# is absent / malformed.
+try:
+    import streamlit as _st  # type: ignore
+    _secret_roster = _st.secrets.get("roster") if hasattr(_st, "secrets") else None
+    if _secret_roster:
+        _parsed = {str(k): str(v) for k, v in dict(_secret_roster).items()}
+        if _parsed:
+            ELIGIBLE_ROSTER = _parsed
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Transaction hygiene: only these Type values contribute to scoring.
 # Everything else (voids, wastage, payments, merges, etc.) is stripped out.

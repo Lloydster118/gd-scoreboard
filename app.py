@@ -496,8 +496,9 @@ with tab_admin:
 
             if diag["unmapped_employees"]:
                 st.warning(
-                    "Sale employees NOT in the eligible roster (add to `src/config.py` "
-                    "or `src/roster_local.py` if they should be competing):"
+                    "Sale employees NOT in the eligible roster (add to `src/config.py`, "
+                    "`src/roster_local.py`, or the `[roster]` section of Streamlit Cloud "
+                    "Secrets if they should be competing):"
                 )
                 st.write(diag["unmapped_employees"])
             else:
