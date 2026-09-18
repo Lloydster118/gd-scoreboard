@@ -457,8 +457,12 @@ with tab_how:
         - **Covers > 0** only (excludes breakfast, rooms, functions)
 
         ### 3. Building "table opportunities"
-        Zonal has one row per menu-item line. We collapse that to one row per unique
-        `(Order No, Employee)` pair. That's a **table opportunity** — one chance to upsell.
+        Zonal has one row per menu-item line, and Zonal generates multiple
+        `Order No`s for a single physical table (each time the till re-opens a tab,
+        adds a course, or splits the bill). To count real tables we collapse to one
+        row per unique `(Date, Table, Server)` — that's one **physical table**,
+        one chance to upsell, regardless of how many separate order numbers Zonal
+        stamped it with. Sales with no `Table` label (bar, iOrder, room service) are excluded.
 
         ### 4. Counting hits
         For each week's theme, we look at which table opportunities contain **at least one**

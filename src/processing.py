@@ -80,20 +80,30 @@ def clean_sales(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_table_view(sales: pd.DataFrame) -> pd.DataFrame:
-    """One row per (Order No, Display) — the true table-opportunity view.
+    """One row per (Date, Table, Display) — the true PHYSICAL table view.
 
-    Groups by canonical Display (not raw Employee alias) so a table that
-    somehow ended up under both of a person's Zonal profiles still counts
-    as one table for them. Zonal repeats Covers on every line of the order;
-    taking the max per order removes the double-count.
+    A single physical table generates multiple `Order No`s in Zonal: every
+    time the till re-opens the tab, adds a course, or splits/transfers the
+    bill it stamps a new order number, so grouping by Order No massively
+    over-counts (a 4-cover table can look like 4 or 5 separate orders).
+
+    Group by (Date, Table, Display) instead: one physical table served by
+    one person on one date = one row. Covers = max across all that
+    table's rows (Zonal repeats the value on every line). Rows with no
+    Table label or with zero covers are excluded — that's iOrder, bar,
+    room service, and other non-restaurant sales.
     """
+    df = sales.copy()
+    df["Table"] = df["Table"].astype(str).str.strip()
+    df = df[df["Table"].notna() & (df["Table"] != "") & (df["Table"].str.lower() != "nan")]
     grouped = (
-        sales.groupby(["Order No", "Display", "Date"], as_index=False)
+        df.groupby(["Date", "Table", "Display"], as_index=False)
         .agg(covers=("Covers", "max"),
              lines=("Quantity", "count"),
-             revenue=("Sales Amount", "sum"))
+             revenue=("Sales Amount", "sum"),
+             order_nos=("Order No", "nunique"))
     )
-    # Restaurant tables only: exclude zero-cover orders (breakfast/rooms/etc).
+    # Restaurant tables only: exclude zero-cover rows (bar / room service).
     grouped = grouped[grouped["covers"] > 0]
     return grouped
 
@@ -106,13 +116,21 @@ def _week_of(d: date) -> WeekTheme | None:
 
 
 def tables_with_target_hit(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
-    """Return distinct (Order No, Display) tables that bought >=1 target item in this week."""
+    """Return distinct (Date, Table, Display) tables that bought ≥1 target item this week.
+
+    Uses the same physical-table identity as build_table_view: (Date, Table, Display).
+    A table with three of that week's target items still counts as one converted
+    table — we measure whether the server opened the upsell opportunity, not volume.
+    """
+    df = sales.copy()
+    df["Table"] = df["Table"].astype(str).str.strip()
     mask = (
-        (sales["Date"] >= week.start)
-        & (sales["Date"] <= week.end)
-        & (sales["Description"].isin(week.items))
+        (df["Date"] >= week.start)
+        & (df["Date"] <= week.end)
+        & (df["Description"].isin(week.items))
+        & df["Table"].notna() & (df["Table"] != "") & (df["Table"].str.lower() != "nan")
     )
-    hits = sales.loc[mask, ["Order No", "Display"]].drop_duplicates()
+    hits = df.loc[mask, ["Date", "Table", "Display"]].drop_duplicates()
     return hits
 
 
@@ -134,14 +152,14 @@ def weekly_leaderboard(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
     # one row on the board.
     per_server = (
         week_tv.groupby(["Display"], as_index=False)
-        .agg(eligible_tables=("Order No", "nunique"),
+        .agg(eligible_tables=("Table", "count"),
              covers=("covers", "sum"))
     )
 
     hits = tables_with_target_hit(sales, week)
     per_server_hits = (
         hits.groupby(["Display"], as_index=False)
-        .agg(tables_with_target=("Order No", "nunique"))
+        .agg(tables_with_target=("Table", "count"))
     )
     board = per_server.merge(per_server_hits, on=["Display"], how="left")
     board["tables_with_target"] = board["tables_with_target"].fillna(0).astype(int)
