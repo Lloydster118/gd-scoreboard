@@ -291,7 +291,7 @@ with tab_leaderboard:
         # Overall standings
         st.subheader(f"Overall standings — £{PRIZE_OVERALL_GBP} campaign prize")
         st.caption(
-            "Average points per week across the 5-week campaign. "
+            "Total ranking points across the 5-week campaign. "
             "Missed weeks count as zero. No minimum-weeks gate."
         )
         overall = overall_leaderboard(sales)
@@ -300,14 +300,9 @@ with tab_leaderboard:
         else:
             show = overall.rename(columns={
                 "Display": "Server",
-                "qualified_weeks": "Qualified weeks",
                 "weeks_worked": "Weeks worked",
                 "total_points": "Total pts",
-                "avg_points": "Avg pts / week",
-                "avg_conversion_pct": "Avg conversion %",
-            })[["Server", "Weeks worked", "Qualified weeks",
-                "Total pts", "Avg pts / week", "Avg conversion %",
-                "is_competitor"]]
+            })[["Server", "Weeks worked", "Total pts", "is_competitor"]]
 
             def _grey_observers_overall(row):
                 if not row["is_competitor"]:
@@ -317,10 +312,9 @@ with tab_leaderboard:
             styled = (
                 show.style
                 .apply(_grey_observers_overall, axis=1)
-                .format({"Avg pts / week": "{:.1f}", "Avg conversion %": "{:.1f}%",
-                         "Total pts": "{:.0f}"})
+                .format({"Total pts": "{:.0f}"})
                 .background_gradient(
-                    subset=pd.IndexSlice[show["is_competitor"], "Avg pts / week"],
+                    subset=pd.IndexSlice[show["is_competitor"], "Total pts"],
                     cmap="Blues",
                 )
             )
@@ -336,7 +330,7 @@ with tab_leaderboard:
                 top = comp_overall.iloc[0]
                 st.success(
                     f"🏆 Provisional overall leader: **{top['Display']}** — "
-                    f"avg {top['avg_points']:.1f} pts/week across the campaign."
+                    f"{int(top['total_points'])} total pts across the campaign."
                 )
 
 # ---------------------------------------------------------------------------
@@ -410,9 +404,9 @@ with tab_rules:
         </div>
         <div class="rule-card">
             <h4>£{PRIZE_OVERALL_GBP} overall prize</h4>
-            <p>Awarded at the end of the 5 weeks to the server with the <b>highest average points per week</b>
+            <p>Awarded at the end of the 5 weeks to the server with the <b>most total ranking points</b>
             across the whole campaign. No minimum-weeks requirement — whatever you work, you work.
-            Missed or below-threshold weeks count as <b>0 points</b> in the average, not N/A.</p>
+            Missed or below-threshold weeks count as <b>0 points</b>, not N/A.</p>
         </div>
         <div class="rule-card">
             <h4>What counts as a "hit"</h4>
@@ -482,8 +476,8 @@ with tab_how:
 
         ### 7. Overall prize
         Each weekly rank gives points (1st=80 down to 8th=10). Points are summed across
-        all 5 weeks and divided by 5. Highest average wins the £50. Absence or below-threshold
-        counts as 0 — no exceptions, no adjustments.
+        all 5 weeks. **Highest total wins the £50.** Absence or below-threshold counts as 0
+        — no exceptions, no adjustments. Work more weeks, bank more points.
 
         ### 8. Why it's honest
         - **Sample floor** stops a lucky Tuesday winning

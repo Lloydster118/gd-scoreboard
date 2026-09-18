@@ -270,8 +270,8 @@ def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
     # Only competitors are prize-eligible; observers are shown for visibility.
     agg["prize_eligible"] = agg["is_competitor"]
     agg = agg.sort_values(
-        ["is_competitor", "avg_points", "avg_conversion_pct", "total_points"],
-        ascending=[False, False, False, False],
+        ["is_competitor", "total_points", "avg_conversion_pct"],
+        ascending=[False, False, False],
     ).reset_index(drop=True)
     return agg
 
