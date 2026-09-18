@@ -191,13 +191,19 @@ def weekly_leaderboard(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
         for t, c in zip(board["eligible_tables"], board["is_competitor"])
     ]
 
-    # Sort: competitors first (by status then metrics), observers at the
-    # bottom (by conversion_pct so the manager view still shows a ranking
-    # among themselves).
+    # Sort order:
+    #   1. Competitors above observers.
+    #   2. Within competitors: Qualified first (ranked), then Building sample
+    #      (unranked, sorted by their own conversion% for a preview), then
+    #      No recorded shift last.
+    #   3. Within each status group: highest conversion% first, then revenue.
+    status_order = {"Qualified": 0, "Building sample": 1, "No recorded shift": 2, "Not competing": 3}
+    board["_status_rank"] = board["status"].map(status_order).fillna(9).astype(int)
     board = board.sort_values(
-        ["is_competitor", "status", "conversion_pct", "target_revenue"],
+        ["is_competitor", "_status_rank", "conversion_pct", "target_revenue"],
         ascending=[False, True, False, False],
     ).reset_index(drop=True)
+    board = board.drop(columns=["_status_rank"])
 
     # Rank only qualified competitor rows.
     qualified_mask = board["status"] == "Qualified"
