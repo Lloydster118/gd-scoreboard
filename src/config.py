@@ -12,75 +12,113 @@ from dataclasses import dataclass, field
 from datetime import date
 
 # ---------------------------------------------------------------------------
-# Eligible floor-team roster (competition entrants only).
-# Names MUST match the exact Employee spelling in the Zonal export.
-# Anything not in this list is excluded from scoring regardless of activity.
+# Roster (competitors + observing managers).
+# Each Person has:
+#   - display: the name shown on the leaderboard
+#   - aliases: one or more exact Zonal `Employee` strings (case-sensitive)
+#              that all resolve to this same person. Enables Zonal duplicate
+#              profiles (e.g. "Jessica Yates" and "jess yates") to be scored
+#              as one person, and typos ("Summer Smmith") to display cleanly.
+#   - competitor: True = ranked and prize-eligible; False = shown on the
+#              board with metrics but greyed out, no rank, no prize (managers
+#              wanting visibility into their own numbers).
 # ---------------------------------------------------------------------------
 
-# NOTE: the roster in this public repo is EXAMPLE data. Real employee names
-# are configured only in the private/local deployment. If you fork this repo,
-# replace these entries with the exact `Employee` strings from your own Zonal
-# export. Any Employee not in this dictionary is silently excluded from scoring.
-ELIGIBLE_ROSTER: dict[str, str] = {
-    # exact Zonal name  ->  display name
-    "Server One":   "Server 1",
-    "Server Two":   "Server 2",
-    "Server Three": "Server 3",
-    "Server Four":  "Server 4",
-    "Server Five":  "Server 5",
-    "Server Six":   "Server 6",
-    "Server Seven": "Server 7",
-    "Server Eight": "Server 8",
-}
+@dataclass(frozen=True)
+class Person:
+    display: str
+    aliases: tuple[str, ...]
+    competitor: bool = True
 
-# Optional local override: if `src/roster_local.py` exists (git-ignored), it
-# replaces the example roster above. This is how the real deployment injects
-# real employee names without exposing them in the public repo.
-try:
-    from .roster_local import ELIGIBLE_ROSTER as _LOCAL_ROSTER  # type: ignore
-    ELIGIBLE_ROSTER = _LOCAL_ROSTER
-except ImportError:
-    pass
+# NOTE: the roster in this public repo is EXAMPLE data. Real employees are
+# configured via `src/roster_local.py` (git-ignored) or Streamlit Cloud
+# Secrets. See loaders below.
+ROSTER: tuple[Person, ...] = (
+    Person("Server 1", ("Server One",)),
+    Person("Server 2", ("Server Two",)),
+    Person("Server 3", ("Server Three",)),
+    Person("Server 4", ("Server Four",)),
+    Person("Manager A", ("Manager One",), competitor=False),
+)
 
-# Streamlit Cloud override: if a [roster] section is defined in the app's
-# Secrets, use that instead. This is how the deployed app injects real
-# employee names without exposing them in this public repo. Format:
-#
-#     [roster]
-#     "Zonal Employee Name" = "Display Name"
-#
-# Silently ignored outside a Streamlit runtime, in tests, or if the section
-# is absent / malformed.
-# Set by the loader below so app.py can surface *why* the override didn't
-# take effect instead of silently falling back to the example roster.
+# Loader state — surfaced in the Admin tab so we can see which override,
+# if any, took effect instead of silently falling back.
 ROSTER_SOURCE: str = "example (src/config.py)"
 ROSTER_SECRETS_ERROR: str | None = None
 
+# Optional local override: if `src/roster_local.py` exists (git-ignored) and
+# defines ROSTER, it replaces the example above. Legacy ELIGIBLE_ROSTER dict
+# is also accepted (all entries become competitors).
 try:
-    from .roster_local import ELIGIBLE_ROSTER as _LOCAL_ROSTER2  # type: ignore  # noqa: F401
-    ROSTER_SOURCE = "src/roster_local.py"
+    from . import roster_local as _local  # type: ignore
+    if hasattr(_local, "ROSTER"):
+        ROSTER = tuple(_local.ROSTER)
+        ROSTER_SOURCE = "src/roster_local.py (ROSTER)"
+    elif hasattr(_local, "ELIGIBLE_ROSTER"):
+        ROSTER = tuple(
+            Person(display=str(v), aliases=(str(k),), competitor=True)
+            for k, v in dict(_local.ELIGIBLE_ROSTER).items()
+        )
+        ROSTER_SOURCE = "src/roster_local.py (ELIGIBLE_ROSTER, legacy)"
 except ImportError:
     pass
 
+# Streamlit Cloud override. Preferred format is an array-of-tables so one
+# person can have multiple Zonal aliases and be marked competitor or not:
+#
+#     [[roster]]
+#     display = "Jess"
+#     aliases = ["Jessica Yates", "jess yates"]
+#     competitor = false
+#
+# Legacy flat-mapping format ([roster] with "Zonal" = "Display") is still
+# accepted; every entry becomes a competitor with one alias.
 try:
     import streamlit as _st  # type: ignore
     _secret_roster = None
     if hasattr(_st, "secrets"):
-        # Both access styles: .get() works in newer Streamlit, subscript is
-        # the reliable path across all versions when the key exists.
         try:
             _secret_roster = _st.secrets["roster"]
         except Exception:
             _secret_roster = _st.secrets.get("roster") if hasattr(_st.secrets, "get") else None
     if _secret_roster:
-        # Streamlit's Secrets object behaves like a Mapping; iterate keys
-        # directly rather than relying on dict() coercion.
-        _parsed = {str(k): str(_secret_roster[k]) for k in _secret_roster}
+        # Detect shape: list-of-tables vs flat dict.
+        _parsed: list[Person] = []
+        if isinstance(_secret_roster, (list, tuple)):
+            for entry in _secret_roster:
+                disp = str(entry["display"]).strip()
+                aliases_raw = entry.get("aliases") if hasattr(entry, "get") else entry["aliases"]
+                aliases = tuple(str(a).strip() for a in aliases_raw)
+                comp = bool(entry.get("competitor", True)) if hasattr(entry, "get") else True
+                if disp and aliases:
+                    _parsed.append(Person(display=disp, aliases=aliases, competitor=comp))
+            _shape = f"array-of-tables, {len(_parsed)} people"
+        else:
+            for k in _secret_roster:
+                zonal = str(k).strip()
+                disp = str(_secret_roster[k]).strip()
+                if zonal and disp:
+                    _parsed.append(Person(display=disp, aliases=(zonal,), competitor=True))
+            _shape = f"flat mapping, {len(_parsed)} entries"
         if _parsed:
-            ELIGIBLE_ROSTER = _parsed
-            ROSTER_SOURCE = f"Streamlit Cloud Secrets ([roster], {len(_parsed)} entries)"
+            ROSTER = tuple(_parsed)
+            ROSTER_SOURCE = f"Streamlit Cloud Secrets ({_shape})"
 except Exception as _e:  # noqa: BLE001
     ROSTER_SECRETS_ERROR = f"{type(_e).__name__}: {_e}"
+
+# ---------------------------------------------------------------------------
+# Derived lookups used by the processing engine.
+#   ELIGIBLE_ROSTER: exact Zonal name -> display name (many aliases -> one
+#                    display; enables the Zonal-duplicate collapse)
+#   COMPETITORS:     set of display names that are prize-eligible; observers
+#                    are excluded from ranking and prize logic
+# ---------------------------------------------------------------------------
+
+ELIGIBLE_ROSTER: dict[str, str] = {
+    alias: p.display for p in ROSTER for alias in p.aliases
+}
+COMPETITORS: set[str] = {p.display for p in ROSTER if p.competitor}
+OBSERVERS: set[str] = {p.display for p in ROSTER if not p.competitor}
 
 # ---------------------------------------------------------------------------
 # Transaction hygiene: only these Type values contribute to scoring.

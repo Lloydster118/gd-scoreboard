@@ -21,6 +21,8 @@ import pandas as pd
 
 from .config import (
     ELIGIBLE_ROSTER,
+    COMPETITORS,
+    OBSERVERS,
     VALID_SALE_TYPES,
     WEEKS,
     WeekTheme,
@@ -60,7 +62,13 @@ def load_transactions(source) -> pd.DataFrame:
 
 
 def clean_sales(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep genuine positive sales for the eligible roster only."""
+    """Keep genuine positive sales for the eligible roster only.
+
+    Every row's `Display` is looked up through ELIGIBLE_ROSTER, which maps
+    any Zonal alias to the single canonical person name. This is where the
+    many-to-one collapse happens — downstream code groups by `Display`,
+    never `Employee`, so duplicate Zonal profiles score as one person.
+    """
     eligible = set(ELIGIBLE_ROSTER)
     sales = df[
         df["Type"].isin(VALID_SALE_TYPES)
@@ -72,13 +80,15 @@ def clean_sales(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_table_view(sales: pd.DataFrame) -> pd.DataFrame:
-    """One row per (Order No, Employee) — the true table-opportunity view.
+    """One row per (Order No, Display) — the true table-opportunity view.
 
-    Zonal repeats Covers on every line of the order; taking the max
-    per order removes the double-count.
+    Groups by canonical Display (not raw Employee alias) so a table that
+    somehow ended up under both of a person's Zonal profiles still counts
+    as one table for them. Zonal repeats Covers on every line of the order;
+    taking the max per order removes the double-count.
     """
     grouped = (
-        sales.groupby(["Order No", "Employee", "Display", "Date"], as_index=False)
+        sales.groupby(["Order No", "Display", "Date"], as_index=False)
         .agg(covers=("Covers", "max"),
              lines=("Quantity", "count"),
              revenue=("Sales Amount", "sum"))
@@ -96,13 +106,13 @@ def _week_of(d: date) -> WeekTheme | None:
 
 
 def tables_with_target_hit(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
-    """Return distinct (Order No, Employee) tables that bought >=1 target item in this week."""
+    """Return distinct (Order No, Display) tables that bought >=1 target item in this week."""
     mask = (
         (sales["Date"] >= week.start)
         & (sales["Date"] <= week.end)
         & (sales["Description"].isin(week.items))
     )
-    hits = sales.loc[mask, ["Order No", "Employee", "Display"]].drop_duplicates()
+    hits = sales.loc[mask, ["Order No", "Display"]].drop_duplicates()
     return hits
 
 
@@ -111,22 +121,29 @@ def weekly_leaderboard(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
 
     Metric: conversion rate = (tables with >=1 target item) / (eligible tables served).
     Sub-metric: incremental revenue = sum(Sales Amount for target items) / eligible tables.
+
+    Observers (managers marked competitor=False in the roster) appear on the
+    board with the same computed metrics but are excluded from ranking and
+    from prize-point allocation — status = "Not competing", points = 0.
     """
     tv = build_table_view(sales)
     week_tv = tv[(tv["Date"] >= week.start) & (tv["Date"] <= week.end)]
 
+    # Aggregate at the DISPLAY level, not the raw Employee alias. This is what
+    # merges Jess's two Zonal profiles and Yasmin's two Zonal profiles into
+    # one row on the board.
     per_server = (
-        week_tv.groupby(["Employee", "Display"], as_index=False)
+        week_tv.groupby(["Display"], as_index=False)
         .agg(eligible_tables=("Order No", "nunique"),
              covers=("covers", "sum"))
     )
 
     hits = tables_with_target_hit(sales, week)
     per_server_hits = (
-        hits.groupby(["Employee", "Display"], as_index=False)
+        hits.groupby(["Display"], as_index=False)
         .agg(tables_with_target=("Order No", "nunique"))
     )
-    board = per_server.merge(per_server_hits, on=["Employee", "Display"], how="left")
+    board = per_server.merge(per_server_hits, on=["Display"], how="left")
     board["tables_with_target"] = board["tables_with_target"].fillna(0).astype(int)
 
     # Target revenue (for secondary sort / display).
@@ -137,24 +154,34 @@ def weekly_leaderboard(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
     )
     rev = (
         sales.loc[mask]
-        .groupby(["Employee", "Display"], as_index=False)
+        .groupby(["Display"], as_index=False)
         .agg(target_revenue=("Sales Amount", "sum"),
              target_units=("Quantity", "sum"))
     )
-    board = board.merge(rev, on=["Employee", "Display"], how="left")
+    board = board.merge(rev, on=["Display"], how="left")
     board[["target_revenue", "target_units"]] = board[["target_revenue", "target_units"]].fillna(0)
 
     board["conversion_pct"] = (
         board["tables_with_target"] / board["eligible_tables"].where(board["eligible_tables"] > 0)
     ).fillna(0) * 100
 
-    board["status"] = board["eligible_tables"].apply(_status_label)
+    # Split competitors vs observers up-front. Observers keep their metrics
+    # for visibility but are never ranked, always sorted to the bottom.
+    board["is_competitor"] = board["Display"].isin(COMPETITORS)
+    board["status"] = [
+        _status_label(t) if c else "Not competing"
+        for t, c in zip(board["eligible_tables"], board["is_competitor"])
+    ]
+
+    # Sort: competitors first (by status then metrics), observers at the
+    # bottom (by conversion_pct so the manager view still shows a ranking
+    # among themselves).
     board = board.sort_values(
-        ["status", "conversion_pct", "target_revenue"],
-        ascending=[True, False, False],
+        ["is_competitor", "status", "conversion_pct", "target_revenue"],
+        ascending=[False, True, False, False],
     ).reset_index(drop=True)
 
-    # Rank only qualified rows.
+    # Rank only qualified competitor rows.
     qualified_mask = board["status"] == "Qualified"
     board["rank"] = None
     board.loc[qualified_mask, "rank"] = range(1, qualified_mask.sum() + 1)
@@ -174,8 +201,10 @@ def _status_label(eligible_tables: int) -> str:
 
 
 def _points_for_row(row) -> int:
+    if row["status"] == "Not competing":
+        return 0  # observers never earn prize points
     if row["status"] == "No recorded shift":
-        return 0  # will be treated as N/A in overall average
+        return 0  # absence = 0, per campaign rules
     if row["status"] == "Building sample":
         return UNQUALIFIED_POINTS
     return RANK_POINTS.get(int(row["rank"]), DEFAULT_RANK_POINTS)
@@ -195,7 +224,6 @@ def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
         for _, r in board.iterrows():
             rows.append({
                 "week": w.number,
-                "Employee": r["Employee"],
                 "Display": r["Display"],
                 "status": r["status"],
                 "points": r["points"],
@@ -203,15 +231,20 @@ def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
             })
     long = pd.DataFrame(rows)
 
-    # Ensure every roster member has a row for every week (0 points if absent).
-    seen = set(zip(long.get("Employee", []), long.get("week", []))) if not long.empty else set()
+    # Ensure every roster member (including observers) has a row for every
+    # week so the overall board is complete. Absent competitor weeks = 0
+    # points; absent observer weeks stay "Not competing".
+    all_displays = sorted(set(ELIGIBLE_ROSTER.values()))
+    seen = set(zip(long.get("Display", []), long.get("week", []))) if not long.empty else set()
     extra = []
-    for name, disp in ELIGIBLE_ROSTER.items():
+    for disp in all_displays:
+        is_comp = disp in COMPETITORS
         for w in WEEKS:
-            if (name, w.number) not in seen:
+            if (disp, w.number) not in seen:
                 extra.append({
-                    "week": w.number, "Employee": name, "Display": disp,
-                    "status": "No recorded shift", "points": 0, "conversion_pct": 0,
+                    "week": w.number, "Display": disp,
+                    "status": "No recorded shift" if is_comp else "Not competing",
+                    "points": 0, "conversion_pct": 0,
                 })
     if extra:
         long = pd.concat([long, pd.DataFrame(extra)], ignore_index=True) if not long.empty else pd.DataFrame(extra)
@@ -221,21 +254,24 @@ def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
 
     total_weeks = len(WEEKS)
     agg = (
-        long.groupby(["Employee", "Display"], as_index=False)
+        long.groupby(["Display"], as_index=False)
         .agg(qualified_weeks=("status", lambda s: (s == "Qualified").sum()),
-             weeks_worked=("status", lambda s: (s != "No recorded shift").sum()),
+             weeks_worked=("status", lambda s: (~s.isin(["No recorded shift", "Not competing"])).sum()),
              total_points=("points", "sum"),
              avg_conversion_pct=("conversion_pct", "mean"))
     )
+    agg["is_competitor"] = agg["Display"].isin(COMPETITORS)
     # Average is total points divided by the full 5-week campaign, not just
     # weeks worked. Absence = 0, exactly as the rules now state.
     agg["avg_points"] = agg["total_points"] / total_weeks
+    # Observers show no prize score — blank it out to avoid confusion.
+    agg.loc[~agg["is_competitor"], "avg_points"] = 0.0
 
-    # Everyone in the roster is prize-eligible; no minimum-weeks gate.
-    agg["prize_eligible"] = True
+    # Only competitors are prize-eligible; observers are shown for visibility.
+    agg["prize_eligible"] = agg["is_competitor"]
     agg = agg.sort_values(
-        ["avg_points", "avg_conversion_pct", "total_points"],
-        ascending=[False, False, False],
+        ["is_competitor", "avg_points", "avg_conversion_pct", "total_points"],
+        ascending=[False, False, False, False],
     ).reset_index(drop=True)
     return agg
 

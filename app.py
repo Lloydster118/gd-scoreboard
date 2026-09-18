@@ -232,10 +232,9 @@ with tab_leaderboard:
             if board.empty:
                 st.info("No activity recorded in this week's data yet.")
             else:
-                _render_weekly_board = None  # placeholder
                 display_board = board[[
                     "rank", "Display", "eligible_tables", "tables_with_target",
-                    "conversion_pct", "target_revenue", "status",
+                    "conversion_pct", "target_revenue", "status", "is_competitor",
                 ]].rename(columns={
                     "rank": "#",
                     "Display": "Server",
@@ -245,15 +244,35 @@ with tab_leaderboard:
                     "target_revenue": "Revenue £",
                     "status": "Status",
                 })
+
+                def _grey_observers(row):
+                    # Managers (observers) are shown for their own visibility
+                    # but greyed out so the competition list stays visually
+                    # dominant.
+                    if not row["is_competitor"]:
+                        return ["color: #888; font-style: italic"] * len(row)
+                    return [""] * len(row)
+
                 styled = (
                     display_board.style
+                    .apply(_grey_observers, axis=1)
                     .format({"Conversion %": "{:.1f}%", "Revenue £": "£{:.2f}",
                              "#": "{:.0f}"}, na_rep="—")
-                    .background_gradient(subset=["Conversion %"], cmap="Greens")
+                    .background_gradient(
+                        subset=pd.IndexSlice[display_board["is_competitor"], "Conversion %"],
+                        cmap="Greens",
+                    )
                 )
-                st.dataframe(styled, use_container_width=True, hide_index=True)
+                # Hide the is_competitor helper column from the rendered view.
+                st.dataframe(
+                    styled,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"is_competitor": None},
+                )
 
-                qualified = board[board["status"] == "Qualified"]
+                comp_board = board[board["is_competitor"]]
+                qualified = comp_board[comp_board["status"] == "Qualified"]
                 if not qualified.empty:
                     top = qualified.iloc[0]
                     st.success(
@@ -263,7 +282,7 @@ with tab_leaderboard:
                     )
                 else:
                     st.warning(
-                        f"No server has hit the {MIN_TABLES_WEEKLY}-table threshold yet — "
+                        f"No competitor has hit the {MIN_TABLES_WEEKLY}-table threshold yet — "
                         "leaderboard is provisional."
                     )
 
@@ -287,20 +306,38 @@ with tab_leaderboard:
                 "avg_points": "Avg pts / week",
                 "avg_conversion_pct": "Avg conversion %",
             })[["Server", "Weeks worked", "Qualified weeks",
-                "Total pts", "Avg pts / week", "Avg conversion %"]]
+                "Total pts", "Avg pts / week", "Avg conversion %",
+                "is_competitor"]]
+
+            def _grey_observers_overall(row):
+                if not row["is_competitor"]:
+                    return ["color: #888; font-style: italic"] * len(row)
+                return [""] * len(row)
+
             styled = (
                 show.style
+                .apply(_grey_observers_overall, axis=1)
                 .format({"Avg pts / week": "{:.1f}", "Avg conversion %": "{:.1f}%",
                          "Total pts": "{:.0f}"})
-                .background_gradient(subset=["Avg pts / week"], cmap="Blues")
+                .background_gradient(
+                    subset=pd.IndexSlice[show["is_competitor"], "Avg pts / week"],
+                    cmap="Blues",
+                )
             )
-            st.dataframe(styled, use_container_width=True, hide_index=True)
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"is_competitor": None},
+            )
 
-            top = overall.iloc[0]
-            st.success(
-                f"🏆 Provisional overall leader: **{top['Display']}** — "
-                f"avg {top['avg_points']:.1f} pts/week across the campaign."
-            )
+            comp_overall = overall[overall["is_competitor"]]
+            if not comp_overall.empty:
+                top = comp_overall.iloc[0]
+                st.success(
+                    f"🏆 Provisional overall leader: **{top['Display']}** — "
+                    f"avg {top['avg_points']:.1f} pts/week across the campaign."
+                )
 
 # ---------------------------------------------------------------------------
 # TAB 2: 5-Week View (with locked future weeks)
@@ -339,8 +376,11 @@ with tab_weeks:
             if status != "locked" and sales is not None and not sales.empty:
                 board = weekly_leaderboard(sales, w)
                 if not board.empty:
-                    top3 = board.head(3)[["rank", "Display", "conversion_pct",
-                                          "tables_with_target", "eligible_tables", "status"]]
+                    # Competitors only in the 5-week compact view. Observers
+                    # (managers) live on the main Leaderboard tab, not here.
+                    comp_only = board[board["is_competitor"]]
+                    top3 = comp_only.head(3)[["rank", "Display", "conversion_pct",
+                                              "tables_with_target", "eligible_tables", "status"]]
                     top3 = top3.rename(columns={
                         "rank": "#", "Display": "Server",
                         "conversion_pct": "Conv %",
@@ -520,9 +560,9 @@ with tab_admin:
 
             if diag["unmapped_employees"]:
                 st.warning(
-                    "Sale employees NOT in the eligible roster (add to `src/config.py`, "
-                    "`src/roster_local.py`, or the `[roster]` section of Streamlit Cloud "
-                    "Secrets if they should be competing):"
+                    "Sale employees NOT in the eligible roster. Add them to "
+                    "`src/config.py`, `src/roster_local.py`, or Streamlit Cloud "
+                    "Secrets (`[[roster]]` array-of-tables) if they should be on the board:"
                 )
                 st.write(diag["unmapped_employees"])
             else:
