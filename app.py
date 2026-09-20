@@ -59,7 +59,7 @@ def show_board(board):
         st.info("No roster configured.")
         return
     view = board.rename(columns={
-        "rank": "#", "Display": "Server", "eligible_tables": "Tables",
+        "rank": "#", "Display": "Server", "eligible_tables": "Accepted tables",
         "target_units": "Portions", "portions_per_100_tables": "Portions / 100 tables",
         "target_revenue": "Target revenue £", "status": "Status",
         "points": "Ranking points",
@@ -67,7 +67,7 @@ def show_board(board):
     view["#"] = view["#"].map(lambda x: str(int(x)) if pd.notna(x) else "")
     view["Portions / 100 tables"] = view["Portions / 100 tables"].map(
         lambda x: f"{x:.1f}" if pd.notna(x) else "Unavailable")
-    st.dataframe(view[["#", "Server", "Tables", "Portions", "Portions / 100 tables",
+    st.dataframe(view[["#", "Server", "Accepted tables", "Portions", "Portions / 100 tables",
                        "Target revenue £", "Ranking points", "Status"]].style.format({
                            "Portions": "{:.0f}", "Target revenue £": "£{:.2f}",
                        }, na_rep="Unavailable"),
@@ -138,7 +138,10 @@ if result is not None:
 tabs = st.tabs(["Leaderboard", "5-Week View", "Rules", "How It Works", "Admin"])
 with tabs[0]:
     st.markdown(f"""<div class="prize-hero"><h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
-    <p>Qualifying portions per 100 assigned table accounts. Every valid portion counts.</p></div>""", unsafe_allow_html=True)
+    <p>Qualifying portions per 100 accepted main-course accounts. Every valid portion counts.</p></div>""", unsafe_allow_html=True)
+    st.caption("Accepted tables are distinct Account IDs, not every table served. "
+               "Drinks/snack-only visits are not assigned by main-course ownership. "
+               "Unresolved relevant corrections remain excluded pending review.")
     st.subheader(f"Week {current.number}: {current.name}")
     if today < current.start:
         st.info(f"Unlocks on {current.start:%A %d %B}.")
@@ -277,6 +280,9 @@ with tabs[4]:
                 st.subheader("Accounts requiring review")
                 pending = result.accounts[result.accounts["issues"].ne("")]
                 st.dataframe(pending.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
+                notes = result.accounts[result.accounts["data_notes"].fillna("").ne("")]
+                with st.expander("Informational cover/table notes (not automatic exclusions)"):
+                    st.dataframe(notes.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
                 options = result.accounts["account_id"].tolist()
                 if options:
                     account_id = st.selectbox("Account to inspect or correct", options)

@@ -157,7 +157,6 @@ WEEKS: tuple[WeekTheme, ...] = (
             "Olives Rustica",
             "Scotch Egg",
             "Blyth Saus Roll",
-            "Chicken Wings",
             "Houmous &Falafel",
             "Tomato Arancini",
             "Charcuterie Plat",

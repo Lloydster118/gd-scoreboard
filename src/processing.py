@@ -141,17 +141,25 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
         covers_values = set(original.loc[original["Covers"] > 0, "Covers"])
         covers = max(covers_values, default=0)
         if not tables or covers <= 0:
-            continue
+            # A till default is not proof that no dining visit happened.
+            # Keep otherwise identifiable main-course accounts in the audit.
+            has_main = any(
+                (mapping := menu_on(r["Date"], menus)) is not None
+                and r["Description"] in mapping["mains"]
+                for _, r in original.iterrows()
+            )
+            if not has_main:
+                continue
         fp = fingerprint(account)
         supplied = reviews.get(str(account_id), {})
         review = supplied if supplied.get("fingerprint") == fp and supplied.get("note", "").strip() else {}
-        issues, blockers = [], []
+        issues, blockers, data_notes = [], [], []
         if supplied and not review:
             issues.append("Review expired: account changed or note missing")
         if review.get("exclude", False):
             accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
                                  covers=covers, owner=None, counted=False, credit_allowed=False,
-                                 issues="Excluded by review", fingerprint=fp))
+                                 issues="Excluded by review", fingerprint=fp, data_notes=""))
             continue
         settled = (account["Type"].eq("Payment") & account["Payment Amount"].gt(0)).any()
         deposit = (account["Type"].eq("Ledger") & account["Description"].eq("Deposit Red")
@@ -160,8 +168,9 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
             blockers.append("Deposit redemption needs settlement review" if deposit else "No positive payment evidence")
         if account["Type"].eq("Reverse Pay").any() and not review.get("settlement_confirmed"):
             blockers.append("Reversed payment needs settlement confirmation")
-        # Ignore unrelated operational corrections, but hold corrections to any
-        # main/target on the relevant date, all transfers, and reversed payments.
+        # Only mains and that sale date's incentive targets affect this score.
+        # A drink/dessert movement must not discard otherwise valid food sales.
+        # Refund/reversal evidence still requires conservative settlement review.
         correction = False
         for _, row in account.iterrows():
             if row["Type"] in SAFE_TYPES and not (row["Type"] == "Sale" and row["Quantity"] < 0):
@@ -169,10 +178,11 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
             if is_staff_food(row["Description"]):
                 continue
             menu = menu_on(row["Date"], menus)
+            week = next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None)
             relevant = bool(menu and (row["Description"] in menu["mains"] or
-                            any(row["Description"] in x for x in menu["targets"].values())))
-            transfer = any(x in row["Type"].lower() for x in ("merged", "moved", "split", "reverse", "refund"))
-            if relevant or transfer:
+                            (week and row["Description"] in menu["targets"].get(str(week.number), []))))
+            financial_reversal = any(x in row["Type"].lower() for x in ("reverse", "refund"))
+            if relevant or financial_reversal:
                 correction = True
         final_sales = _reviewed_sales(review, account) if review else None
         if correction and final_sales is None:
@@ -225,8 +235,12 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
             if any(w.number > 1 and sales["Date"].between(w.start, w.end).any() for w in WEEKS):
                 if not review.get("preorder_targets_confirmed") or final_sales is None:
                     blockers.append("Preselected courses: verified target eligibility and final sales required")
-        if len(tables) > 1 or len(covers_values) > 1 or sum(owner_weights.values()) > covers:
-            issues.append("Table/cover/main-portion inconsistency")
+        if not tables:
+            data_notes.append("Table number missing; Account ID identifies visit")
+        if covers <= 0 or len(covers_values) > 1 or sum(owner_weights.values()) > covers:
+            data_notes.append("Covers missing/inconsistent; not used to assign ownership")
+        if len(tables) > 1:
+            issues.append("Multiple table numbers: ownership needs review")
             owner = None
         override = review.get("owner")
         if override:
@@ -263,10 +277,10 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
         accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
                              covers=covers, owner=owner, counted=bool(owner) and not blockers,
                              credit_allowed=credit_allowed, issues="; ".join(dict.fromkeys(issues)),
-                             fingerprint=fp))
+                             fingerprint=fp, data_notes="; ".join(data_notes)))
     return ScoringResult(
         pd.DataFrame(accounts, columns=["account_id", "Date", "table", "covers", "owner",
-                                       "counted", "credit_allowed", "issues", "fingerprint"]),
+                                       "counted", "credit_allowed", "issues", "fingerprint", "data_notes"]),
         pd.DataFrame(credits, columns=["account_id", "Date", "week", "Display",
                                       "target_units", "target_revenue"]),
         pd.DataFrame(unknown, columns=["Date", "Description", "reason"]).drop_duplicates(),
