@@ -36,15 +36,24 @@ It is deliberately not a covers-adjusted or own-table conversion measure.
 Payments from any employee are matched by Account ID. Payment activity is evidence,
 not proof of final bill settlement. Deposit-only accounts require confirmation.
 
-SF-tagged staff food is excluded. Main-course ties, unknown ownership, inconsistent
-covers, explicit preorders and relevant corrections are visible in the private admin
-review queue. Large party size alone does not exclude an ordinary account.
+SF-tagged staff food is excluded. Main-course ties, unknown ownership, multiple table
+numbers, explicit preorders and relevant corrections are visible in the private admin
+review queue. Missing/under-entered/inconsistent covers are informational notes, not
+ownership vetoes. A known main-course account is audited even with zero covers or no
+table number: its Account ID identifies the visit. Large party size alone does not
+exclude an ordinary account.
 
+Relevant means a recognised main or target for the week of that transaction's date.
+Unrelated drink/dessert transfers and another week's starter corrections do not
+discard valid current-week food scores. Refund/reversal evidence remains a blocker.
 Relevant voids/corrections and transfers are **held**, not blindly subtracted or
 double-counted. The supervisor supplies verified final sales for the affected
 account, preserving the original sale-entry employee. Other valid accounts continue
 to score. Unresolved ownership keeps item credits but holds that denominator, so
 rankings remain explicitly provisional until reviewed.
+
+The public table column says "Accepted tables", not total tables served.
+Chicken Wings is excluded from Week 1 nibbles and retained in confirmed Week 2 starters.
 
 Reviews require an evidence note and are bound to the full account fingerprint.
 A changed account expires its previous review. Private snapshot history records

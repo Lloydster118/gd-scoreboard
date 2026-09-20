@@ -122,10 +122,11 @@ class ScoringTests(unittest.TestCase):
         r = score([row(qty=14, covers=14), paid(covers=14)])
         self.assertTrue(r.accounts.iloc[0]["counted"])
 
-    def test_cover_mismatch_is_review(self):
+    def test_cover_mismatch_is_informational_not_ownership_blocker(self):
         r = score([row(qty=20, covers=2), paid()])
-        self.assertFalse(r.accounts.iloc[0]["counted"])
-        self.assertIn("inconsistency", r.accounts.iloc[0]["issues"])
+        self.assertTrue(r.accounts.iloc[0]["counted"])
+        self.assertEqual(r.accounts.iloc[0]["issues"], "")
+        self.assertIn("Covers", r.accounts.iloc[0]["data_notes"])
 
     def test_missing_payment_holds_numerator_and_denominator(self):
         r = score([row(), row(item="Scotch Egg")])
@@ -198,11 +199,51 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(b.loc["Beta", "rank"], 1)
         self.assertEqual(b.loc["Beta", "points"], 80)
 
-    def test_zero_cover_or_no_table_no_credit(self):
-        for kwargs in ({"covers": 0}, {"table": ""}):
+    def test_main_account_with_zero_cover_or_no_table_is_not_lost(self):
+        for kwargs in ({"covers": 0}, {"table": ""}, {"covers": 0, "table": ""}):
             r = score([row(**kwargs), row(item="Scotch Egg", **kwargs), paid(**kwargs)])
-            self.assertTrue(r.accounts.empty)
-            self.assertTrue(r.credits.empty)
+            self.assertEqual(board(r).loc["Alpha", "eligible_tables"], 1)
+            self.assertEqual(board(r).loc["Alpha", "target_units"], 1)
+            self.assertNotEqual(r.accounts.iloc[0]["data_notes"], "")
+
+    def test_no_table_and_no_mains_still_not_dining_candidate(self):
+        r = score([row(item="Beer", table="", covers=0), paid(table="", covers=0)])
+        self.assertTrue(r.accounts.empty)
+
+    def test_zero_cover_does_not_bypass_missing_payment(self):
+        r = score([row(covers=0)])
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+
+    def test_drink_transfer_does_not_block_lunch_nibbles(self):
+        r = score([row(qty=4, covers=3), row(item="Olives Rustica"),
+                   row(item="Charcuterie Plat"), row(kind="Item moved - from account",
+                   item="DeluxHotChoco", qty=-3), paid()])
+        self.assertEqual(board(r).loc["Alpha", "eligible_tables"], 1)
+        self.assertEqual(board(r).loc["Alpha", "target_units"], 2)
+
+    def test_dessert_merge_does_not_block_week_one_main(self):
+        r = score([row(), row(kind="Merged - to account", item="Ice Cream"), paid()])
+        self.assertTrue(r.accounts.iloc[0]["counted"])
+
+    def test_next_week_starter_clear_does_not_block_week_one(self):
+        for day, expected in [("19/09/2026", True), ("22/09/2026", False)]:
+            r = score([row(day=day), row(day=day, item="Cheese Souffle"),
+                       row(day=day, item="Cheese Souffle", kind="Clear", qty=-1),
+                       paid(day=day)])
+            self.assertEqual(bool(r.accounts.iloc[0]["counted"]), expected)
+
+    def test_main_transfer_still_held(self):
+        r = score([row(), row(kind="Merged - to account"), paid()])
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+
+    def test_multiple_table_numbers_still_held(self):
+        r = score([row(table="101"), row(table="102"), paid()])
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+
+    def test_wings_only_week_two_not_week_one(self):
+        for day, expected in [("19/09/2026", 0), ("22/09/2026", 1)]:
+            r = score([row(day=day), row(day=day, item="Chicken Wings"), paid(day=day)])
+            self.assertEqual(r.credits.target_units.sum(), expected)
 
     def test_negative_review_quantities_rejected(self):
         rows = [row(), paid()]

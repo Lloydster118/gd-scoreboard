@@ -2,7 +2,9 @@
 
 ## Automated coverage
 
-Release validation: 51 tests passed locally, including two Streamlit AppTest cases.
+Release validation: 59 tests passed locally, including two Streamlit AppTest cases.
+The denominator follow-up covers zero/missing covers, missing table identifiers,
+unrelated transfers, week-specific corrections, and Week 1/2 wings eligibility.
 The 14–18 September exports were also parsed structurally: all 5,218 rows retained,
 213 distinct candidate dining accounts and no duplicate account ownership records.
 That structural test used anonymised all-staff mappings, not the production roster.
