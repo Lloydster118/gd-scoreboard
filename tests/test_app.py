@@ -54,6 +54,7 @@ class AppTests(unittest.TestCase):
             store = LocalStore(Path(directory) / "state.gz")
             rows = [row(employee="Server One"), row(employee="Server One", item="Scotch Egg"), paid()]
             state, _ = replacement_state(empty_state(), pd.DataFrame(rows).to_csv(index=False).encode())
+            state["roster_additions"] = [{"display": "New Server", "aliases": ["New Till"], "competitor": True}]
             version = store.save(state, None)
             with patch("src.storage.LocalStore.load", return_value=(state, version)):
                 app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
@@ -68,6 +69,7 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(len(app.exception), 0)
                 self.assertTrue(any(b.label == "Lock admin" for b in app.button))
                 self.assertTrue(any("Server 1" in str(d.value) for d in app.dataframe))
+                self.assertTrue(any("New Server" in str(d.value) for d in app.dataframe))
                 next(b for b in app.button if b.label == "Lock admin").click().run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertFalse(any(b.label == "Save reviewed account" for b in app.button))

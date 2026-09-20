@@ -18,6 +18,7 @@ from src.config import (
     PRIZE_WEEKLY_GBP, PRIZE_OVERALL_GBP, ROSTER_SOURCE,
 )
 from src.menus import DEFAULT_MENUS, menu_on, validate_menus
+from src.roster import with_additions
 from src.processing import (
     EXCLUDED_OWNER, load_transactions, score_accounts,
     weekly_leaderboard, overall_leaderboard, category_leaderboard,
@@ -85,9 +86,11 @@ def save_state(new_state, message):
     try:
         # Validate the complete configuration and reviewed sales before persisting.
         validate_menus(new_state["menus"])
+        candidate_roster, _ = with_additions(ELIGIBLE_ROSTER, COMPETITORS,
+                                             new_state.get("roster_additions", []))
         if new_state["csv"]:
             score_accounts(load_transactions(new_state["csv"].encode()),
-                           new_state["menus"], new_state["reviews"])
+                           new_state["menus"], new_state["reviews"], candidate_roster)
         store.save(new_state, version)
     except Exception as exc:
         st.error(f"Not saved: {exc}")
@@ -111,12 +114,14 @@ raw, result = None, None
 legacy_path = Path(__file__).parent / "data" / "combined_transactions.csv"
 if not load_error:
     try:
+        ELIGIBLE_ROSTER, COMPETITORS = with_additions(
+            ELIGIBLE_ROSTER, COMPETITORS, state.get("roster_additions", []))
         if state["csv"]:
             raw = load_transactions(state["csv"].encode())
         elif legacy_path.exists():
             raw = load_transactions(legacy_path)
         if raw is not None:
-            result = score_accounts(raw, state["menus"], state["reviews"])
+            result = score_accounts(raw, state["menus"], state["reviews"], ELIGIBLE_ROSTER)
     except Exception:
         load_error = "Saved data or review configuration is invalid. Rankings are paused; check the admin configuration."
 
@@ -153,12 +158,12 @@ with tabs[0]:
     elif result is None or load_error:
         st.info("The scoreboard will appear after a valid cumulative upload.")
     else:
-        show_board(weekly_result(state, result, current))
+        show_board(weekly_result(state, result, current, ELIGIBLE_ROSTER, COMPETITORS))
         st.subheader("Overall standings")
         st.caption("£50 habit-building competition: categories keep tracking from launch through 18 October. "
                    "Each contributes up to 20 points: cumulative category ranking points ÷ 80 × 20. "
                    "Five equally weighted categories, 100 points maximum. Not a sum of frozen weekly results.")
-        overall = overall_leaderboard(result)
+        overall = overall_leaderboard(result, ELIGIBLE_ROSTER, COMPETITORS)
         if overall["provisional"].any():
             st.warning("Overall standings remain provisional while rolling-category accounts need review.")
         st.dataframe(overall.drop(columns=["total_points", "provisional"]).rename(columns={
@@ -172,7 +177,7 @@ with tabs[0]:
                     st.subheader(f"{week.name}: ongoing")
                     st.caption(f"Sales from {week.start:%d %b} through 18 Oct. "
                                "At least 15 shared table opportunities required per category.")
-                    show_board(category_leaderboard(result, week))
+                    show_board(category_leaderboard(result, week, ELIGIBLE_ROSTER, COMPETITORS))
 
 with tabs[1]:
     for week in WEEKS:
@@ -197,7 +202,7 @@ with tabs[1]:
                 st.warning("Weekly sales window closed. Awaiting complete data and admin review before the £10 result is frozen.")
             else:
                 st.caption("£10 weekly competition open. This category continues towards £50 after the weekly window closes.")
-            show_board(weekly_result(state, result, week))
+            show_board(weekly_result(state, result, week, ELIGIBLE_ROSTER, COMPETITORS))
 
 with tabs[2]:
     st.subheader("Competition rules")
@@ -290,6 +295,7 @@ with tabs[4]:
         if st.session_state.get("saved_message"):
             st.success(st.session_state.pop("saved_message"))
         st.caption(f"Roster source: {ROSTER_SOURCE}")
+        st.caption(f"Private roster additions: {len(state.get('roster_additions', []))}")
         if load_error:
             st.error("Resolve the storage/configuration error before editing. No replacement can be saved.")
         else:
@@ -322,7 +328,8 @@ with tabs[4]:
                     freeze_complete = st.checkbox("I confirm the entire week's export is complete and all account reviews are resolved.")
                     if st.button("Freeze weekly prize result", disabled=not freeze_complete or store is None):
                         try:
-                            candidate = finalise_week(state, WEEKS[selected_week - 1], today, freeze_complete)
+                            candidate = finalise_week(state, WEEKS[selected_week - 1], today, freeze_complete,
+                                                      ELIGIBLE_ROSTER, COMPETITORS)
                             save_state(candidate, "Weekly £10 result frozen. Overall category tracking continues.")
                         except Exception as exc:
                             st.error(f"Result not frozen: {exc}")

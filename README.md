@@ -3,6 +3,13 @@
 A Streamlit scoreboard for a five-week hospitality incentive. Public source code;
 private transaction snapshots and staff configuration.
 
+Additional staff can be configured privately in the saved snapshot's optional
+`roster_additions` list using `display`, exact till `aliases`, and a boolean
+`competitor` flag. These supplement the Streamlit Secrets roster without placing
+employee names in public source. Alias conflicts and changes to existing prize
+eligibility fail closed. Additions rescore existing exports for open weekly and
+ongoing category standings; previously frozen weekly results remain unchanged.
+
 ## Scoring
 
 The weekly metric is:

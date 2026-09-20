@@ -1,4 +1,4 @@
-# Deployment environment revision: rolling-habits-v1 (2026-09-20).
+# Deployment environment revision: private-roster-v1 (2026-09-20).
 # Refresh the Streamlit process when introducing new scoring-module exports.
 streamlit>=1.36,<2
 pandas>=2.2,<3
