@@ -5,7 +5,7 @@ can supply its verified final sales, with a fingerprint that expires on change.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import hashlib
 import io
@@ -98,6 +98,7 @@ class ScoringResult:
     accounts: pd.DataFrame
     credits: pd.DataFrame
     unknown_products: pd.DataFrame
+    categories: dict = field(default_factory=dict)
 
 
 def _reviewed_sales(review, account):
@@ -124,7 +125,7 @@ def _reviewed_sales(review, account):
     return result
 
 
-def score_accounts(raw, menus=None, reviews=None, roster=None):
+def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
     menus = validate_menus(DEFAULT_MENUS if menus is None else menus)
     reviews = reviews or {}
     roster = ELIGIBLE_ROSTER if roster is None else roster
@@ -178,7 +179,8 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
             if is_staff_food(row["Description"]):
                 continue
             menu = menu_on(row["Date"], menus)
-            week = next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None)
+            week = (WEEKS[category - 1] if category else
+                    next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None))
             relevant = bool(menu and (row["Description"] in menu["mains"] or
                             (week and row["Description"] in menu["targets"].get(str(week.number), []))))
             financial_reversal = any(x in row["Type"].lower() for x in ("reverse", "refund"))
@@ -207,7 +209,8 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
         if missing_menu:
             blockers.append("No confirmed menu for sale date")
         for sale_day in set(sales["Date"]):
-            active = next((w for w in WEEKS if w.start <= sale_day <= w.end), None)
+            active = (WEEKS[category - 1] if category else
+                      next((w for w in WEEKS if w.start <= sale_day <= w.end), None))
             mapping = menu_on(sale_day, menus)
             if active and mapping and str(active.number) not in mapping["targets"]:
                 blockers.append(f"Week {active.number} targets not confirmed")
@@ -248,6 +251,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
                 raise ValueError("Reviewed owner is not in the current roster.")
             owner = override
             issues = [x for x in issues if x.startswith("Review expired")]
+        owner_identity = owner
         if owner and owner.startswith(EXCLUDED_OWNER):
             owner = EXCLUDED_OWNER
         if owner is None:
@@ -258,7 +262,8 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
         credit_allowed = not blockers
         if credit_allowed:
             for _, row in sales.iterrows():
-                week = next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None)
+                week = (WEEKS[category - 1] if category else
+                        next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None))
                 menu = menu_on(row["Date"], menus)
                 if week is None or menu is None:
                     continue
@@ -269,7 +274,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
                     issues.append("Preselected courses: target eligibility needs review")
                     continue
                 if row["Description"] in menu["targets"][str(week.number)] and row["Quantity"] > 0:
-                    person = roster.get(row["Employee"])
+                    person = roster.get(row["Employee"], EXCLUDED_OWNER + ": " + row["Employee"])
                     if person:
                         credits.append(dict(account_id=account_id, Date=row["Date"], week=week.number,
                                             Display=person, target_units=row["Quantity"],
@@ -277,29 +282,51 @@ def score_accounts(raw, menus=None, reviews=None, roster=None):
         accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
                              covers=covers, owner=owner, counted=bool(owner) and not blockers,
                              credit_allowed=credit_allowed, issues="; ".join(dict.fromkeys(issues)),
-                             fingerprint=fp, data_notes="; ".join(data_notes)))
-    return ScoringResult(
+                             fingerprint=fp, data_notes="; ".join(data_notes),
+                             owner_identity=owner_identity))
+    result = ScoringResult(
         pd.DataFrame(accounts, columns=["account_id", "Date", "table", "covers", "owner",
-                                       "counted", "credit_allowed", "issues", "fingerprint", "data_notes"]),
+                                       "counted", "credit_allowed", "issues", "fingerprint", "data_notes",
+                                       "owner_identity"]),
         pd.DataFrame(credits, columns=["account_id", "Date", "week", "Display",
                                       "target_units", "target_revenue"]),
         pd.DataFrame(unknown, columns=["Date", "Description", "reason"]).drop_duplicates(),
     )
+    if category is None and not raw.empty:
+        for theme in WEEKS:
+            # Preserve whole accounts and fingerprints, including cross-week
+            # exceptions. A partial account must never become a valid visit.
+            first_days = raw[raw["Type"].eq("Sale") & raw["Quantity"].gt(0)].groupby("Account ID")["Date"].min()
+            ids = first_days[first_days.between(theme.start, WEEKS[-1].end)].index
+            subset = raw[raw["Account ID"].isin(ids)]
+            if not subset.empty:
+                result.categories[theme.number] = score_accounts(
+                    subset, menus, reviews, roster, category=theme.number)
+    return result
 
 
-def weekly_leaderboard(result, week, roster=None, competitors=None):
+def weekly_leaderboard(result, week, roster=None, competitors=None, *, period_end=None):
     roster = ELIGIBLE_ROSTER if roster is None else roster
     competitors = COMPETITORS if competitors is None else competitors
     accounts = result.accounts
-    accounts = accounts[accounts["Date"].between(week.start, week.end)]
-    units = result.credits[result.credits["week"] == week.number]
+    end = week.end if period_end is None else period_end
+    accounts = accounts[accounts["Date"].between(week.start, end)]
+    units = result.credits[(result.credits["week"] == week.number)
+                           & result.credits["Date"].between(week.start, end)]
+    opportunities = {}
+    sellers = units.groupby("account_id")["Display"].agg(set).to_dict()
+    for account in accounts[accounts["counted"]].itertuples():
+        identity = getattr(account, "owner_identity", account.owner)
+        participants = sellers.get(account.account_id, set()) | {identity}
+        share = 1.0 / len(participants)
+        for person in participants:
+            opportunities[person] = opportunities.get(person, 0.0) + share
     rows = []
     for person in sorted(set(roster.values())):
-        owned = accounts[accounts["counted"] & accounts["owner"].eq(person)]
         own_units = units[units["Display"].eq(person)]
-        n, qty = len(owned), own_units["target_units"].sum()
+        n, qty = opportunities.get(person, 0.0), own_units["target_units"].sum()
         status = ("Not competing" if person not in competitors else
-                  "Qualified" if n >= MIN_TABLES_WEEKLY else
+                  "Qualified" if n >= MIN_TABLES_WEEKLY - 1e-9 else
                   "Building sample" if n else "Rate unavailable" if qty else "No recorded shift")
         rows.append(dict(Display=person, eligible_tables=n, target_units=qty,
                          target_revenue=own_units["target_revenue"].sum(),
@@ -326,12 +353,26 @@ def weekly_leaderboard(result, week, roster=None, competitors=None):
     return board
 
 
+def category_leaderboard(result, week, roster=None, competitors=None):
+    rolling = result.categories.get(week.number)
+    if rolling is None:
+        rolling = ScoringResult(result.accounts.iloc[:0], result.credits.iloc[:0],
+                                result.unknown_products.iloc[:0])
+    return weekly_leaderboard(rolling, week, roster, competitors, period_end=WEEKS[-1].end)
+
+
 def overall_leaderboard(result, roster=None, competitors=None):
-    boards = [weekly_leaderboard(result, w, roster, competitors).assign(week=w.number) for w in WEEKS]
+    boards = [category_leaderboard(result, w, roster, competitors).assign(week=w.number) for w in WEEKS]
     long = pd.concat(boards, ignore_index=True)
     if long.empty:
         return long
-    return (long.groupby(["Display", "is_competitor"], as_index=False)
+    overall = (long.groupby(["Display", "is_competitor"], as_index=False)
             .agg(total_points=("points", "sum"),
-                 weeks_worked=("eligible_tables", lambda x: int((x > 0).sum())))
+                 categories_qualified=("status", lambda x: int(x.eq("Qualified").sum())))
             .sort_values(["is_competitor", "total_points", "Display"], ascending=[False, False, True]))
+    overall["overall_score"] = overall["total_points"] / max(RANK_POINTS.values()) * (100 / len(WEEKS))
+    for week in WEEKS:
+        points = long[long["week"].eq(week.number)].set_index("Display")["points"]
+        overall[f"category_{week.number}"] = overall["Display"].map(points) / max(RANK_POINTS.values()) * 20
+    overall["provisional"] = bool(long["provisional"].any())
+    return overall

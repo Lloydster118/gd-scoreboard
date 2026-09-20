@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import gzip
 import hashlib
 import io
@@ -16,7 +16,8 @@ import urllib.error
 import urllib.request
 
 from .menus import DEFAULT_MENUS, validate_menus
-from .processing import load_transactions, validate_replacement
+from .processing import load_transactions, validate_replacement, score_accounts, weekly_leaderboard
+from .config import WEEKS
 
 
 class StorageError(RuntimeError):
@@ -25,7 +26,7 @@ class StorageError(RuntimeError):
 
 def empty_state():
     return {"schema": 1, "csv": None, "menus": copy.deepcopy(DEFAULT_MENUS),
-            "reviews": {}, "upload": None}
+            "reviews": {}, "upload": None, "weekly_results": {}}
 
 
 def encode(state):
@@ -44,9 +45,48 @@ def decode(content):
     validate_menus(state["menus"])
     if not isinstance(state["reviews"], dict):
         raise StorageError("Invalid review state.")
+    state.setdefault("weekly_results", {})
+    if not isinstance(state["weekly_results"], dict):
+        raise StorageError("Invalid frozen weekly results.")
     if state["csv"] is not None:
         load_transactions(state["csv"].encode())
     return state
+
+
+def weekly_result(state, result, week, roster=None, competitors=None):
+    """Closed results are read from immutable private snapshots, never rescored."""
+    frozen = state.get("weekly_results", {}).get(str(week.number))
+    if frozen:
+        import pandas as pd
+        return pd.DataFrame(frozen["board"])
+    return weekly_leaderboard(result, week, roster, competitors)
+
+
+def finalise_week(state, week, today, confirmed_complete=False, roster=None, competitors=None):
+    if today <= week.end:
+        raise ValueError("The weekly competition has not ended yet.")
+    if str(week.number) in state.get("weekly_results", {}):
+        raise ValueError("This weekly result is already frozen and cannot be overwritten.")
+    if not confirmed_complete:
+        raise ValueError("Confirm the complete week's export and review before freezing.")
+    if not state.get("csv") or not state.get("upload"):
+        raise ValueError("Upload a complete cumulative export first.")
+    if date.fromisoformat(state["upload"]["end"]) < week.end:
+        raise ValueError("Uploaded data does not cover the end of this week.")
+    raw = load_transactions(state["csv"].encode())
+    scored = score_accounts(raw, state["menus"], state["reviews"], roster)
+    board = weekly_leaderboard(scored, week, roster, competitors)
+    if board.empty or board["provisional"].any():
+        raise ValueError("Resolve this week's account reviews before freezing its prize result.")
+    new = copy.deepcopy(state)
+    new.setdefault("weekly_results", {})[str(week.number)] = {
+        "board": json.loads(board.to_json(orient="records")),
+        "frozen_at": datetime.now(timezone.utc).isoformat(),
+        "period_end": week.end.isoformat(),
+        "source_sha256": hashlib.sha256(state["csv"].encode()).hexdigest(),
+        "rules": "rolling-habits-v1; shared-category-opportunities",
+    }
+    return new
 
 
 def replacement_state(state, payload, allow_reduction=False, today=None):

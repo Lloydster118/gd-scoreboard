@@ -2,7 +2,16 @@
 
 ## Automated coverage
 
-Release validation: 59 tests passed locally, including two Streamlit AppTest cases.
+Rolling-habits release validation: 73 tests passed locally, including three Streamlit
+AppTest cases. New coverage includes equal-weight rolling categories through Week 5,
+no retroactive credit, fractional opportunities and category-specific sharing,
+outside-roster shares, immutable weekly snapshots, safe legacy-state migration,
+and the actual admin freeze button with durable read-back.
+Read-only production audit of the saved 14–19 September export confirms all previous
+account decisions, roster portion totals and reviewed exceptions are preserved.
+Total opportunity shares equal the number of accepted accounts.
+
+Earlier release validation: 59 tests passed locally, including two Streamlit AppTest cases.
 The denominator follow-up covers zero/missing covers, missing table identifiers,
 unrelated transfers, week-specific corrections, and Week 1/2 wings eligibility.
 The 14–18 September exports were also parsed structurally: all 5,218 rows retained,
@@ -36,7 +45,8 @@ Browser checks completed on synthetic data: desktop/mobile layout, all public ta
 admin login/logout, invalid upload rejection, identical reupload, backup download,
 review save, overlapping-menu rejection and valid menu save.
 Private GitHub initialization also passed a save/read-back and missing-SHA conflict check.
-No real transaction data has been uploaded to the new private repository.
+Real transaction data is stored only in the private data repository, never in the
+public source repository or synthetic QA preview.
 
 ## Production rollout gate
 
@@ -55,5 +65,5 @@ No real transaction data has been uploaded to the new private repository.
 Synthetic tests and the historical exports cannot establish final ownership,
 settlement or correction semantics for ambiguous real accounts.
 The engine exposes those decisions for documented review instead of inventing them.
-The 15-account eligibility threshold is retained, not newly calibrated.
+The 15-opportunity threshold now uses fractional shares, not rounded account counts.
 Menu transitions are date-level; part-day transitions need additional rules.

@@ -21,8 +21,7 @@ STARTERS = (
 )
 NIBBLES = (
     "Baguette & Dips", "Olives Rustica", "Scotch Egg", "Blyth Saus Roll",
-    "Houmous &Falafel", "Tomato Arancini",
-    "Charcuterie Plat", "Vegetarian Board", "Cheese Selection",
+    "Tomato Arancini", "Charcuterie Plat", "Vegetarian Board",
 )
 DEFAULT_MENUS = [{
     "name": "Confirmed outgoing menu",

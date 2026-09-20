@@ -2,11 +2,14 @@
 import tempfile
 from pathlib import Path
 import unittest
+from dataclasses import replace
+from datetime import date
 from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
 from src.storage import LocalStore, empty_state, replacement_state
+from src.config import WEEKS
 from test_scoring import row, paid
 import pandas as pd
 
@@ -14,6 +17,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppTests(unittest.TestCase):
+    def test_admin_can_freeze_completed_week_and_public_result_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalStore(Path(directory) / "state.gz")
+            rows = [row(employee="Server One"), row(employee="Server One", item="Scotch Egg"), paid(),
+                    row("2", employee="Server One", day="19/09/2026"), paid("2", day="19/09/2026")]
+            state, _ = replacement_state(empty_state(), pd.DataFrame(rows).to_csv(index=False).encode(),
+                                         today=date(2026, 9, 20))
+            store.save(state, None)
+            # A synthetic already-closed window exercises the real admin button.
+            weeks = (replace(WEEKS[0], end=date(2026, 9, 19)),) + WEEKS[1:]
+            with patch("src.storage.LocalStore", return_value=store), patch("src.config.WEEKS", weeks):
+                app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
+                app.secrets = {"admin_pin": "synthetic-secret", "storage": {"development_local": True}}
+                app.run()
+                app.text_input[0].set_value("synthetic-secret")
+                next(b for b in app.button if b.label == "Unlock admin").click().run()
+                next(c for c in app.checkbox if "entire week's export" in c.label).check().run()
+                next(b for b in app.button if b.label == "Freeze weekly prize result").click().run()
+                self.assertEqual(len(app.exception), 0)
+                self.assertIn("1", store.load()[0]["weekly_results"])
+                self.assertTrue(any("weekly result frozen" in x.value for x in app.success))
+                next(b for b in app.button if b.label == "Lock admin").click().run()
+                self.assertFalse(any(b.label == "Freeze weekly prize result" for b in app.button))
+
     def test_empty_app_and_missing_pin_fail_closed(self):
         app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
         app.secrets = {"admin_pin": "", "storage": {"development_local": False}}

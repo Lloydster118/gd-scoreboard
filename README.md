@@ -8,7 +8,7 @@ private transaction snapshots and staff configuration.
 The weekly metric is:
 
 ```text
-valid qualifying portions / assigned eligible table accounts × 100
+valid qualifying portions / shared eligible table opportunities × 100
 ```
 
 This is **portions per 100 tables**, not conversion percentage. Three qualifying
@@ -18,18 +18,45 @@ portions on one account earn three credits. Scores above 100 are legitimate.
 - Main-course portions identify the ordinary account owner. Aliases resolve to one
   employee. Chateaubriand has ownership weight two.
 - Target portions go to their sale-entry employee, regardless of account ownership.
-- Manager-owned accounts do not enter competitors' denominators. Competitor sales
-  on those accounts retain their portion credit.
+- Each accepted account contributes exactly one opportunity per category, split
+  equally between its main-course owner and distinct qualifying sellers. Two people
+  get 0.5 each; three get one third. Owner/seller aliases are not counted twice.
+- Managers and outside-roster sellers keep their share; it is not redistributed.
+  Only roster members appear on the public board, and only competitors can win.
 - Zero-target accounts still enter the assigned owner's denominator.
 - Zero assigned accounts means an unavailable rate, not infinity or an invented zero.
-- The existing 15-account minimum is retained. Qualified weekly ranks earn
+- The minimum is 15 shared opportunities in the scoring window. Qualified ranks earn
   80/70/60/50/40/30/20/10 points; qualified lower ranks earn 10. Other weeks earn zero.
-- Observers never earn prize points. Overall standings sum all five weeks.
+- Observers never earn prize points. Overall standings use five rolling categories,
+  not the frozen weekly results.
 - Target revenue breaks rate ties. Exact ties share a rank and need prize review.
 
-The rate measures sales contribution relative to assigned workload. Cross-table
-selling and large groups can increase a numerator without increasing its denominator.
+The rate measures sales contribution relative to shared workload. Cross-table
+selling shares the account opportunity; large groups still count as one account.
 It is deliberately not a covers-adjusted or own-table conversion measure.
+
+### Weekly prizes and sustained habits
+
+- The £10 weekly competition uses only the launch week's sales, Monday to Sunday
+  in UK calendar dates. Future sales cannot enter that weekly window.
+- After the week ends, Admin can freeze the weekly board once the complete week's
+  export is uploaded and its account reviews are resolved. Until then it is marked
+  closed, pending finalisation, not a confirmed winner.
+- A frozen board is stored in the private snapshot, with timestamp and source hash.
+  Uploads, menu changes and account reviews cannot overwrite it. No automatic prize
+  payment occurs; exact ties require manual prize review.
+- Each category also continues from its launch through 18 October for the £50
+  overall competition. Nibbles run from Week 1 to Week 5; starters from Week 2 to
+  Week 5, with no retrospective Week 1 starter credit.
+- Cumulative category portions / cumulative shared opportunities determines its
+  rank, using the same 15-opportunity minimum and revenue tie-break.
+- Each category's ranking points / 80 × 20 contributes up to 20 overall points:
+  five equal 20% weights, 100 maximum. Not-yet-launched, missing or below-threshold
+  categories contribute zero; weights are never redistributed.
+- Weekly and rolling category reviews are evaluated independently. A later nibble
+  correction can hold rolling nibble credit without blocking valid weekly starters.
+- Snack-only/unresolved-owner accounts still need review: item credit may remain
+  visible, but the app does not invent a main-course opportunity.
 
 ## Review, not guesswork
 
@@ -43,7 +70,7 @@ ownership vetoes. A known main-course account is audited even with zero covers o
 table number: its Account ID identifies the visit. Large party size alone does not
 exclude an ordinary account.
 
-Relevant means a recognised main or target for the week of that transaction's date.
+Relevant means a recognised main or target for the category being evaluated.
 Unrelated drink/dessert transfers and another week's starter corrections do not
 discard valid current-week food scores. Refund/reversal evidence remains a blocker.
 Relevant voids/corrections and transfers are **held**, not blindly subtracted or
@@ -52,8 +79,10 @@ account, preserving the original sale-entry employee. Other valid accounts conti
 to score. Unresolved ownership keeps item credits but holds that denominator, so
 rankings remain explicitly provisional until reviewed.
 
-The public table column says "Accepted tables", not total tables served.
-Chicken Wings is excluded from Week 1 nibbles and retained in confirmed Week 2 starters.
+The public column says "Table opportunities", showing fractional shares, not total
+tables served. Chicken Wings and Houmous &Falafel are excluded from nibbles and
+retained in starters. Cheese Selection is not a nibble; later dessert mappings
+must be confirmed before their launch.
 
 Reviews require an evidence note and are bound to the full account fingerprint.
 A changed account expires its previous review. Private snapshot history records
@@ -65,6 +94,8 @@ review changes. Final prize decisions must wait for relevant review resolution.
 23 September 2026. The 13 confirmed starter names replace the old inaccurate list.
 
 No menu is assumed from 24 September onward; later-week targets are unconfirmed.
+Every later menu period must include ALL launched category mappings, not only the
+new weekly theme. Missing mappings fail closed for the affected rolling category.
 Admin can add exact product mappings and non-overlapping effective dates without
 editing code. Scoring and ownership use the sale date, preserving historical rules.
 Unknown products are catalogued privately for review; drinks/modifiers will also
@@ -90,7 +121,8 @@ the prior snapshot. Daily incremental uploads are not supported.
   unused payment/customer fields are discarded.
 
 Production storage is a **separate private GitHub repository**, holding one compressed
-snapshot (`state.json.gz`) with CSV, dated menus, reviews and upload metadata.
+snapshot (`state.json.gz`) with CSV, dated menus, reviews, frozen weekly boards
+and upload metadata. Existing snapshots migrate without changing their source data.
 Git history supplies recovery versions. SHA-based writes reject concurrent updates.
 The backend refuses a public data repository. GitHub authentication errors and
 corrupt snapshots are shown as unavailable data, not an empty successful scoreboard.
