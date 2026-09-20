@@ -20,9 +20,12 @@ from src.config import (
 from src.menus import DEFAULT_MENUS, menu_on, validate_menus
 from src.processing import (
     EXCLUDED_OWNER, load_transactions, score_accounts,
-    weekly_leaderboard, overall_leaderboard,
+    weekly_leaderboard, overall_leaderboard, category_leaderboard,
 )
-from src.storage import GitHubStore, LocalStore, StorageError, empty_state, replacement_state
+from src.storage import (
+    GitHubStore, LocalStore, StorageError, empty_state, replacement_state,
+    weekly_result, finalise_week,
+)
 
 st.set_page_config(page_title="G&D Upsell Scoreboard", page_icon="🍽️", layout="wide")
 st.markdown("""
@@ -59,7 +62,7 @@ def show_board(board):
         st.info("No roster configured.")
         return
     view = board.rename(columns={
-        "rank": "#", "Display": "Server", "eligible_tables": "Accepted tables",
+        "rank": "#", "Display": "Server", "eligible_tables": "Table opportunities",
         "target_units": "Portions", "portions_per_100_tables": "Portions / 100 tables",
         "target_revenue": "Target revenue £", "status": "Status",
         "points": "Ranking points",
@@ -67,9 +70,10 @@ def show_board(board):
     view["#"] = view["#"].map(lambda x: str(int(x)) if pd.notna(x) else "")
     view["Portions / 100 tables"] = view["Portions / 100 tables"].map(
         lambda x: f"{x:.1f}" if pd.notna(x) else "Unavailable")
-    st.dataframe(view[["#", "Server", "Accepted tables", "Portions", "Portions / 100 tables",
+    st.dataframe(view[["#", "Server", "Table opportunities", "Portions", "Portions / 100 tables",
                        "Target revenue £", "Ranking points", "Status"]].style.format({
                            "Portions": "{:.0f}", "Target revenue £": "£{:.2f}",
+                           "Table opportunities": "{:.2f}",
                        }, na_rep="Unavailable"),
                  hide_index=True, use_container_width=True)
 
@@ -139,7 +143,8 @@ tabs = st.tabs(["Leaderboard", "5-Week View", "Rules", "How It Works", "Admin"])
 with tabs[0]:
     st.markdown(f"""<div class="prize-hero"><h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
     <p>Qualifying portions per 100 accepted main-course accounts. Every valid portion counts.</p></div>""", unsafe_allow_html=True)
-    st.caption("Accepted tables are distinct Account IDs, not every table served. "
+    st.caption("One accepted Account ID contributes one table opportunity per category, shared between "
+               "the main-course owner and qualifying-item sellers (0.5 each when two people share). "
                "Drinks/snack-only visits are not assigned by main-course ownership. "
                "Unresolved relevant corrections remain excluded pending review.")
     st.subheader(f"Week {current.number}: {current.name}")
@@ -148,14 +153,26 @@ with tabs[0]:
     elif result is None or load_error:
         st.info("The scoreboard will appear after a valid cumulative upload.")
     else:
-        show_board(weekly_leaderboard(result, current))
+        show_board(weekly_result(state, result, current))
         st.subheader("Overall standings")
-        st.caption("Provisional ranking points across all five weeks. Missing or below-threshold weeks earn zero.")
+        st.caption("£50 habit-building competition: categories keep tracking from launch through 18 October. "
+                   "Each contributes up to 20 points: cumulative category ranking points ÷ 80 × 20. "
+                   "Five equally weighted categories, 100 points maximum. Not a sum of frozen weekly results.")
         overall = overall_leaderboard(result)
-        st.dataframe(overall.rename(columns={"Display": "Server", "total_points": "Total ranking points",
-                                             "weeks_worked": "Weeks with assigned tables",
-                                             "is_competitor": "Competing"}),
+        if overall["provisional"].any():
+            st.warning("Overall standings remain provisional while rolling-category accounts need review.")
+        st.dataframe(overall.drop(columns=["total_points", "provisional"]).rename(columns={
+                         "Display": "Server", "overall_score": "Overall / 100",
+                         "categories_qualified": "Categories qualified", "is_competitor": "Competing",
+                         **{f"category_{w.number}": f"Category {w.number} / 20" for w in WEEKS}}),
                      hide_index=True, use_container_width=True)
+        with st.expander("Ongoing category scores for the £50 prize"):
+            for week in WEEKS:
+                if today >= week.start:
+                    st.subheader(f"{week.name}: ongoing")
+                    st.caption(f"Sales from {week.start:%d %b} through 18 Oct. "
+                               "At least 15 shared table opportunities required per category.")
+                    show_board(category_leaderboard(result, week))
 
 with tabs[1]:
     for week in WEEKS:
@@ -173,7 +190,14 @@ with tabs[1]:
         if any(menu_on(d, state["menus"]) is None or str(week.number) not in menu_on(d, state["menus"])["targets"] for d in days):
             st.warning("Some dates have no confirmed target/menu mapping. Those dates will not be guessed.")
         if result is not None and not load_error:
-            show_board(weekly_leaderboard(result, week))
+            frozen = state.get("weekly_results", {}).get(str(week.number))
+            if frozen:
+                st.success("£10 weekly result frozen. Later sales only affect the separate overall competition.")
+            elif today > week.end:
+                st.warning("Weekly sales window closed. Awaiting complete data and admin review before the £10 result is frozen.")
+            else:
+                st.caption("£10 weekly competition open. This category continues towards £50 after the weekly window closes.")
+            show_board(weekly_result(state, result, week))
 
 with tabs[2]:
     st.subheader("Competition rules")
@@ -181,17 +205,27 @@ with tabs[2]:
 - **Weekly score:** Valid qualifying portions ÷ eligible table accounts assigned to you × 100.
 - **Every portion counts:** Three of the same qualifying item earn three portion credits. There is no per-account cap.
 - **Credit follows the sale entry:** You retain credit for qualifying portions you enter on someone else's account.
-- **One account, one owner:** Ordinary ownership follows the greatest number of main-course portions entered.
+- **Main-course owner:** Ordinary ownership follows the greatest number of main-course portions entered.
   Chateaubriand counts as two main portions for ownership, not double upsell credit.
-- **Manager-owned accounts:** No competitor receives the table in their denominator. Competitor item credit remains.
-- **Zero-target accounts:** Still count towards the owner's table denominator.
+- **Shared opportunities:** For each category, split one accepted account equally between its main-course owner
+  and distinct qualifying-item sellers. Two people receive 0.5 each; three receive one third each.
+  The same person acting as owner and seller receives only one share. Portions stay entirely with their seller.
+- **Managers:** Keep their share and their item credit but cannot win prizes. Their share is not redistributed.
+- **Zero-target accounts:** Still contribute one opportunity to the main-course owner.
+- **Unresolved/no-main accounts:** Item credit can remain visible, but no opportunity is invented; results stay provisional.
 - **Zero assigned tables:** The rate is unavailable, not zero or infinity; no weekly rank.
-- **Weekly eligibility:** Retain the current {MIN_TABLES_WEEKLY}-account minimum. Below it, results are visible but earn no ranking points.
+- **Eligibility:** At least {MIN_TABLES_WEEKLY} shared table opportunities in the relevant scoring window.
+  Below it, results are visible but earn no ranking points.
 - **Prizes:** £{PRIZE_WEEKLY_GBP} weekly and £{PRIZE_OVERALL_GBP} overall.
 - **Ranking points:** 80, 70, 60, 50, 40, 30, 20, 10 for first through eighth; 10 below eighth if qualified.
-  Missing and below-threshold weeks earn zero. Managers never earn competition points.
+- **Weekly £10:** Only the launch week's sales count. After Sunday closes, the administrator freezes the result
+  once the complete export and account reviews are ready. Subsequent uploads cannot overwrite a frozen result.
+- **Overall £50:** Each category continues from its launch until 18 October. Its cumulative rate determines
+  a fresh category rank, independently of the weekly prize. Each category contributes ranking points ÷ 80 × 20,
+  giving five equal 20% weights and a maximum of 100 overall. Locked, missing and below-threshold categories earn zero.
+  Managers never earn competition points. There is no retrospective credit before a category launches.
 - **Ties:** Target-item revenue breaks equal rates. Exact rate-and-revenue ties share a rank and require prize review.
-- **Review first:** Missing payment evidence, ownership ties, cover inconsistencies and relevant corrections remain flagged.
+- **Review first:** Missing payment evidence, ownership ties and relevant corrections remain flagged.
   Rankings are provisional until the affected accounts are resolved.
 """)
 with tabs[3]:
@@ -223,7 +257,8 @@ that the export included every transaction, so the supervisor must confirm its s
 
 ### A contribution rate, not a conversion percentage
 Six portions over three assigned tables means 200 portions per 100 tables. Scores above 100
-are valid. Cross-table selling can increase your numerator without increasing your denominator.
+are valid. Cross-table selling adds item credit and shares the accepted account opportunity
+with the main-course owner, separately for each category.
 Large groups count as one account, so this is table-relative rather than covers-relative.
 """)
 
@@ -277,12 +312,38 @@ with tabs[4]:
                 st.download_button("Download private scoring-data backup", state["csv"],
                                    "scoreboard-private-backup.csv", "text/csv")
             if result is not None:
+                st.subheader("Freeze a completed £10 weekly result")
+                st.caption("Weekly sales stop at Sunday midnight UK time. Freeze only after complete uploads and reviews. "
+                           "Frozen results cannot be overwritten; rolling £50 scores remain live.")
+                finished = [w for w in WEEKS if today > w.end and
+                            str(w.number) not in state.get("weekly_results", {})]
+                if finished:
+                    selected_week = st.selectbox("Completed week to freeze", [w.number for w in finished])
+                    freeze_complete = st.checkbox("I confirm the entire week's export is complete and all account reviews are resolved.")
+                    if st.button("Freeze weekly prize result", disabled=not freeze_complete or store is None):
+                        try:
+                            candidate = finalise_week(state, WEEKS[selected_week - 1], today, freeze_complete)
+                            save_state(candidate, "Weekly £10 result frozen. Overall category tracking continues.")
+                        except Exception as exc:
+                            st.error(f"Result not frozen: {exc}")
+                else:
+                    st.info("No completed, unfrozen week is ready for finalisation.")
                 st.subheader("Accounts requiring review")
                 pending = result.accounts[result.accounts["issues"].ne("")]
                 st.dataframe(pending.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
                 notes = result.accounts[result.accounts["data_notes"].fillna("").ne("")]
                 with st.expander("Informational cover/table notes (not automatic exclusions)"):
                     st.dataframe(notes.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
+                with st.expander("Ongoing £50 category review queues"):
+                    st.caption("Later corrections or missing mappings can affect an ongoing category even when "
+                               "the current £10 weekly category is valid. The same account-review controls apply.")
+                    for theme in WEEKS:
+                        rolling = result.categories.get(theme.number)
+                        if rolling is not None:
+                            flagged = rolling.accounts[rolling.accounts["issues"].ne("")]
+                            st.caption(f"Category {theme.number}: {theme.name} · {len(flagged)} flagged accounts")
+                            if not flagged.empty:
+                                st.dataframe(flagged.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
                 options = result.accounts["account_id"].tolist()
                 if options:
                     account_id = st.selectbox("Account to inspect or correct", options)
@@ -327,6 +388,8 @@ with tabs[4]:
                     st.dataframe(result.unknown_products, hide_index=True, use_container_width=True)
             st.subheader("Effective-dated menu configuration")
             st.caption("Add confirmed new periods without overwriting historical mappings. No overlapping date ranges.")
+            st.caption("Every new menu period needs mappings for ALL launched categories, including continuing nibbles "
+                       "and starters. Missing category mappings pause that category; they are never guessed.")
             menu_text = st.text_area("Menu JSON", value=json.dumps(state["menus"], indent=2), height=300)
             historical = st.checkbox("I intend to correct historical menu rules and have reviewed the effect on previous scores.")
             if st.button("Save menu mappings", disabled=store is None):

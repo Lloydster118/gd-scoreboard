@@ -68,18 +68,20 @@ class ScoringTests(unittest.TestCase):
     def test_cross_table_credit_and_alias(self):
         r = score([row(employee="B"), row(employee="A alias", item="Olives Rustica", qty=2), paid()])
         b = board(r)
-        self.assertEqual(b.loc["Beta", "eligible_tables"], 1)
+        self.assertEqual(b.loc["Beta", "eligible_tables"], .5)
         self.assertEqual(b.loc["Alpha", "target_units"], 2)
-        self.assertTrue(pd.isna(b.loc["Alpha", "portions_per_100_tables"]))
-        self.assertEqual(b.loc["Alpha", "status"], "Rate unavailable")
+        self.assertEqual(b.loc["Alpha", "eligible_tables"], .5)
+        self.assertEqual(b.loc["Alpha", "portions_per_100_tables"], 400)
+        self.assertEqual(b.loc["Alpha", "status"], "Building sample")
         self.assertEqual(b.loc["Alpha", "points"], 0)
 
     def test_manager_owned_keeps_competitor_credit(self):
         r = score([row(employee="M"), row(item="Olives Rustica", qty=4), paid()])
-        self.assertEqual(board(r).loc["Alpha", "eligible_tables"], 0)
+        self.assertEqual(board(r).loc["Alpha", "eligible_tables"], .5)
         self.assertEqual(board(r).loc["Alpha", "target_units"], 4)
         self.assertEqual(board(r).loc["Manager", "status"], "Not competing")
         self.assertEqual(board(r).loc["Manager", "points"], 0)
+        self.assertEqual(board(r).loc["Manager", "eligible_tables"], .5)
 
     def test_zero_target_account_in_denominator(self):
         self.assertEqual(board(score([row(), paid()])).loc["Alpha", "eligible_tables"], 1)

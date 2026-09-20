@@ -129,11 +129,10 @@ VALID_SALE_TYPES: set[str] = {"Sale"}
 
 # ---------------------------------------------------------------------------
 # Incentive campaign definition.
-# Each week has a theme and a list of qualifying menu items (Description
-# values as they appear in Zonal). Items may appear in more than one week
-# by design (e.g. Cheese Selection = shareable board in Week 1 AND cheese
-# course in Week 4). Double counting inside a single week's leaderboard
-# is prevented by table-level conversion (one qualifying table = one hit).
+# Each week launches a theme which continues for the overall competition.
+# The legacy item lists below are descriptive only: effective-dated mappings
+# in src/menus.py and the private snapshot are the scoring authority.
+# Portion quantities, not table conversion, determine item credit.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -157,11 +156,9 @@ WEEKS: tuple[WeekTheme, ...] = (
             "Olives Rustica",
             "Scotch Egg",
             "Blyth Saus Roll",
-            "Houmous &Falafel",
             "Tomato Arancini",
             "Charcuterie Plat",
             "Vegetarian Board",
-            "Cheese Selection",
         ),
     ),
     WeekTheme(
@@ -171,15 +168,18 @@ WEEKS: tuple[WeekTheme, ...] = (
         end=date(2026, 9, 27),
         items=(
             "Prawn Cocktail",
-            "Devon Crab",
             "Cheese Souffle",
             "Goats Cheese",
             "Crab & Avocado",
             "Beetroot Terrine",
             "Fish Soup",
-            "Scallops Crusted",
-            "Sun Beet Parcel",
-            "Tomato Burrata",
+            "Chicken Wings",
+            "Houmous &Falafel",
+            "CH Crudites Houm",
+            "CH Breadsticks",
+            "PF S'cornChowder",
+            "PFPottedMackerel",
+            "PF Plum Salad",
         ),
     ),
     WeekTheme(
