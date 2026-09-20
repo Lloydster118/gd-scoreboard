@@ -1,585 +1,340 @@
-"""
-George & Dragon — Floor Team Upsell Incentive Scoreboard
-=========================================================
-
-Public-facing scoreboard for the 5-week floor-team upselling incentive.
-Anyone with the link can view the leaderboard, rules, and how-it-works.
-Only the supervisor (with the admin PIN) can upload new Zonal data.
-
-Data is stored server-side as CSV in ./data/ so uploads persist between
-visits. Future weeks auto-lock until their Monday.
-"""
-
+"""G&D account-based incentive scoreboard. Private admin data stays server-side."""
 from __future__ import annotations
 
+import copy
 import datetime as dt
+import hmac
 import io
-import os
+import json
 from pathlib import Path
+import time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 from src.config import (
-    WEEKS,
-    ELIGIBLE_ROSTER,
-    MIN_TABLES_WEEKLY,
-    PRIZE_WEEKLY_GBP,
-    PRIZE_OVERALL_GBP,
-    RANK_POINTS,
-    ROSTER_SOURCE,
-    ROSTER_SECRETS_ERROR,
+    WEEKS, ELIGIBLE_ROSTER, COMPETITORS, MIN_TABLES_WEEKLY,
+    PRIZE_WEEKLY_GBP, PRIZE_OVERALL_GBP, ROSTER_SOURCE,
 )
+from src.menus import DEFAULT_MENUS, menu_on, validate_menus
 from src.processing import (
-    load_transactions,
-    clean_sales,
-    weekly_leaderboard,
-    overall_leaderboard,
-    diagnostics,
+    EXCLUDED_OWNER, load_transactions, score_accounts,
+    weekly_leaderboard, overall_leaderboard,
 )
+from src.storage import GitHubStore, LocalStore, StorageError, empty_state, replacement_state
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
-COMBINED_CSV = DATA_DIR / "combined_transactions.csv"
+st.set_page_config(page_title="G&D Upsell Scoreboard", page_icon="🍽️", layout="wide")
+st.markdown("""
+<style>
+[data-testid="stMainBlockContainer"] {padding-top:2rem;max-width:1200px}
+h1 {font-size:1.9rem!important}
+@media(max-width:600px){h1{font-size:1.5rem!important}h2{font-size:1.25rem!important}}
+.prize-hero {background:linear-gradient(135deg,#1e293b,#0f172a);padding:1.5rem;
+border-radius:12px;border:1px solid #334155;margin-bottom:1.5rem}
+.prize-hero h2 {color:#fbbf24;margin:0 0 .4rem}
+.prize-hero p {color:#cbd5e1;margin:0}
+</style>
+""", unsafe_allow_html=True)
 
-# Admin PIN: set via Streamlit secrets in production. Falls back to a local
-# default so the app still runs in dev. Change this in .streamlit/secrets.toml
-# on Streamlit Cloud: `admin_pin = "your-pin"`.
-def _load_admin_pin() -> str:
-    """Read admin PIN from Streamlit secrets, defaulting to 'gd2026'.
 
-    Never lets a missing or malformed secrets.toml crash app startup:
-    both st.secrets access and .get() can raise StreamlitSecretNotFoundError
-    if the whole file failed to parse (e.g. bad TOML in an unrelated section).
-    """
-    if not hasattr(st, "secrets"):
-        return "gd2026"
+def secret(name, default=None):
     try:
-        return st.secrets.get("admin_pin", "gd2026")
+        return st.secrets.get(name, default)
     except Exception:
-        return "gd2026"
+        return default
 
-ADMIN_PIN = _load_admin_pin()
 
-st.set_page_config(
-    page_title="G&D Upsell Scoreboard",
-    page_icon="🍽️",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+def get_store():
+    settings = secret("storage", {})
+    if settings.get("repo") and settings.get("token"):
+        return GitHubStore(settings["repo"], settings["token"]), True
+    if settings.get("development_local", False):
+        return LocalStore(Path(__file__).parent / "data" / "state.json.gz"), False
+    return None, False
 
-# ---------------------------------------------------------------------------
-# Styling
-# ---------------------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-    .main .block-container {padding-top: 1.5rem; max-width: 1200px;}
-    .kpi {background:#0e1117; padding:1rem 1.25rem; border-radius:12px;
-          border:1px solid #262730;}
-    .kpi h3 {margin:0; font-size:0.75rem; color:#9ca3af; font-weight:600;
-             letter-spacing:0.05em; text-transform:uppercase;}
-    .kpi p  {margin:0.25rem 0 0 0; font-size:1.6rem; font-weight:700; color:#fafafa;}
-    .locked-card {background:#0e1117; padding:1.5rem; border-radius:12px;
-                  border:1px dashed #374151; text-align:center; color:#6b7280;}
-    .rule-card {background:#0e1117; padding:1.25rem 1.5rem; border-radius:12px;
-                border:1px solid #262730; margin-bottom:0.75rem;}
-    .rule-card h4 {margin:0 0 0.5rem 0; color:#fafafa;}
-    .rule-card p {margin:0; color:#9ca3af; font-size:0.95rem;}
-    .prize-hero {background:linear-gradient(135deg,#1e293b,#0f172a);
-                 padding:2rem; border-radius:16px; border:1px solid #334155;
-                 text-align:center;}
-    .prize-hero h2 {margin:0 0 0.5rem 0; color:#fbbf24;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def load_persisted_data() -> pd.DataFrame | None:
-    """Load the combined CSV that survives across visits."""
-    if not COMBINED_CSV.exists():
-        return None
+def show_board(board):
+    if board.empty:
+        st.info("No roster configured.")
+        return
+    view = board.rename(columns={
+        "rank": "#", "Display": "Server", "eligible_tables": "Tables",
+        "target_units": "Portions", "portions_per_100_tables": "Portions / 100 tables",
+        "target_revenue": "Target revenue £", "status": "Status",
+        "points": "Ranking points",
+    })
+    view["#"] = view["#"].map(lambda x: str(int(x)) if pd.notna(x) else "")
+    view["Portions / 100 tables"] = view["Portions / 100 tables"].map(
+        lambda x: f"{x:.1f}" if pd.notna(x) else "Unavailable")
+    st.dataframe(view[["#", "Server", "Tables", "Portions", "Portions / 100 tables",
+                       "Target revenue £", "Ranking points", "Status"]].style.format({
+                           "Portions": "{:.0f}", "Target revenue £": "£{:.2f}",
+                       }, na_rep="Unavailable"),
+                 hide_index=True, use_container_width=True)
+
+
+def save_state(new_state, message):
+    if store is None:
+        st.error("Connect private storage before saving.")
+        return
     try:
-        return load_transactions(COMBINED_CSV)
+        # Validate the complete configuration and reviewed sales before persisting.
+        validate_menus(new_state["menus"])
+        if new_state["csv"]:
+            score_accounts(load_transactions(new_state["csv"].encode()),
+                           new_state["menus"], new_state["reviews"])
+        store.save(new_state, version)
+    except Exception as exc:
+        st.error(f"Not saved: {exc}")
+        return
+    st.session_state["saved_message"] = message
+    st.rerun()
+
+
+st.title("George & Dragon · Upsell Scoreboard")
+st.caption("Marlow · Floor team · Five-week incentive")
+store, durable = get_store()
+state, version = empty_state(), None
+load_error = None
+if store:
+    try:
+        state, version = store.load()
     except Exception:
-        return None
+        load_error = "The saved snapshot could not be loaded. Rankings and editing are paused; check private storage."
 
+raw, result = None, None
+legacy_path = Path(__file__).parent / "data" / "combined_transactions.csv"
+if not load_error:
+    try:
+        if state["csv"]:
+            raw = load_transactions(state["csv"].encode())
+        elif legacy_path.exists():
+            raw = load_transactions(legacy_path)
+        if raw is not None:
+            result = score_accounts(raw, state["menus"], state["reviews"])
+    except Exception:
+        load_error = "Saved data or review configuration is invalid. Rankings are paused; check the admin configuration."
 
-def append_upload(new_df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Merge a new upload into the persisted store. Dedupes on all columns."""
-    if COMBINED_CSV.exists():
-        existing = pd.read_csv(COMBINED_CSV, low_memory=False)
-        combined = pd.concat([existing, new_df_raw], ignore_index=True)
+today = dt.datetime.now(ZoneInfo("Europe/London")).date()
+current = next((w for w in WEEKS if w.start <= today <= w.end), WEEKS[0] if today < WEEKS[0].start else WEEKS[-1])
+if load_error:
+    st.error(load_error)
+if not durable:
+    st.warning("Permanent private storage is not connected. Do not rely on temporary server files surviving a restart.")
+if state["upload"]:
+    meta = state["upload"]
+    uploaded_at = dt.datetime.fromisoformat(meta["at"]).astimezone(ZoneInfo("Europe/London"))
+    st.caption(f"Data coverage: {meta['start']} to {meta['end']} · "
+               f"Updated: {uploaded_at:%d %b %Y, %H:%M %Z} · {meta['rows']:,} transaction rows")
+elif raw is not None:
+    st.warning("Legacy temporary data loaded for preview only. Re-upload the full cumulative export into private storage.")
+if result is not None:
+    review_count = int(result.accounts["issues"].ne("").sum())
+    if review_count:
+        st.warning(f"Provisional: {review_count} accounts need admin review. Held or unresolved accounts can change rankings; do not award prizes yet.")
+    st.caption("Payments are evidence of activity, not a guarantee that every bill is finally settled.")
+
+tabs = st.tabs(["Leaderboard", "5-Week View", "Rules", "How It Works", "Admin"])
+with tabs[0]:
+    st.markdown(f"""<div class="prize-hero"><h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
+    <p>Qualifying portions per 100 assigned table accounts. Every valid portion counts.</p></div>""", unsafe_allow_html=True)
+    st.subheader(f"Week {current.number}: {current.name}")
+    if today < current.start:
+        st.info(f"Unlocks on {current.start:%A %d %B}.")
+    elif result is None or load_error:
+        st.info("The scoreboard will appear after a valid cumulative upload.")
     else:
-        combined = new_df_raw.copy()
-    # Dedupe: identical rows (same order line, same date, same everything) collapse.
-    combined = combined.drop_duplicates()
-    combined.to_csv(COMBINED_CSV, index=False)
-    return combined
+        show_board(weekly_leaderboard(result, current))
+        st.subheader("Overall standings")
+        st.caption("Provisional ranking points across all five weeks. Missing or below-threshold weeks earn zero.")
+        overall = overall_leaderboard(result)
+        st.dataframe(overall.rename(columns={"Display": "Server", "total_points": "Total ranking points",
+                                             "weeks_worked": "Weeks with assigned tables",
+                                             "is_competitor": "Competing"}),
+                     hide_index=True, use_container_width=True)
 
+with tabs[1]:
+    for week in WEEKS:
+        st.subheader(f"Week {week.number}: {week.name}")
+        st.caption(f"{week.start:%d %b} to {week.end:%d %b}")
+        if today < week.start:
+            st.info(f"Locked until {week.start:%A %d %B}.")
+            continue
+        for menu in state["menus"]:
+            start, end = dt.date.fromisoformat(menu["start"]), dt.date.fromisoformat(menu["end"])
+            if start <= week.end and end >= week.start and str(week.number) in menu["targets"]:
+                st.caption(f"{max(start, week.start)} to {min(end, week.end)}: "
+                           + ", ".join(menu["targets"][str(week.number)]))
+        days = [week.start + dt.timedelta(days=i) for i in range((week.end-week.start).days+1)]
+        if any(menu_on(d, state["menus"]) is None or str(week.number) not in menu_on(d, state["menus"])["targets"] for d in days):
+            st.warning("Some dates have no confirmed target/menu mapping. Those dates will not be guessed.")
+        if result is not None and not load_error:
+            show_board(weekly_leaderboard(result, week))
 
-def week_status(week, today: dt.date) -> str:
-    """One of: 'locked' (future), 'live' (current), 'closed' (past)."""
-    if today < week.start:
-        return "locked"
-    if today > week.end:
-        return "closed"
-    return "live"
+with tabs[2]:
+    st.subheader("Competition rules")
+    st.markdown(f"""
+- **Weekly score:** Valid qualifying portions ÷ eligible table accounts assigned to you × 100.
+- **Every portion counts:** Three of the same qualifying item earn three portion credits. There is no per-account cap.
+- **Credit follows the sale entry:** You retain credit for qualifying portions you enter on someone else's account.
+- **One account, one owner:** Ordinary ownership follows the greatest number of main-course portions entered.
+  Chateaubriand counts as two main portions for ownership, not double upsell credit.
+- **Manager-owned accounts:** No competitor receives the table in their denominator. Competitor item credit remains.
+- **Zero-target accounts:** Still count towards the owner's table denominator.
+- **Zero assigned tables:** The rate is unavailable, not zero or infinity; no weekly rank.
+- **Weekly eligibility:** Retain the current {MIN_TABLES_WEEKLY}-account minimum. Below it, results are visible but earn no ranking points.
+- **Prizes:** £{PRIZE_WEEKLY_GBP} weekly and £{PRIZE_OVERALL_GBP} overall.
+- **Ranking points:** 80, 70, 60, 50, 40, 30, 20, 10 for first through eighth; 10 below eighth if qualified.
+  Missing and below-threshold weeks earn zero. Managers never earn competition points.
+- **Ties:** Target-item revenue breaks equal rates. Exact rate-and-revenue ties share a rank and require prize review.
+- **Review first:** Missing payment evidence, ownership ties, cover inconsistencies and relevant corrections remain flagged.
+  Rankings are provisional until the affected accounts are resolved.
+""")
+with tabs[3]:
+    st.subheader("How the score is calculated")
+    st.markdown("""
+### Accounts, not table labels
+Each Account ID represents a visit. Two sittings at the same physical table remain separate;
+multiple order numbers and payments on one account do not create extra tables.
 
+### Menu rules follow the transaction date
+The confirmed outgoing menu ends on 23 September. From 24 September, new mappings must be
+confirmed before scoring. Main-course ownership and target products both use dated rules.
+Unconfirmed later-week menus are not activated.
 
-def current_or_next_week(today: dt.date):
-    for w in WEEKS:
-        if w.start <= today <= w.end:
-            return w
-    # If we're before the campaign, return week 1; if after, return last week.
-    if today < WEEKS[0].start:
-        return WEEKS[0]
-    return WEEKS[-1]
+### Valid sales and review
+SF-tagged staff food is excluded. Payment may be recorded by any employee on the same account.
+Deposit redemption without ordinary payment evidence needs settlement confirmation.
+Relevant voids, corrections and transfers require a reviewed final sales list, rather than
+blind subtraction. Package charges and modifiers do not become extra mains.
+Confirmed preorders need an owner review; later-week preselected-course eligibility needs explicit confirmation.
+Large walk-ins are not excluded merely because they have 12 or more guests.
 
+### Cumulative uploads
+Upload the complete export from 14 September through the latest completed reporting period.
+It replaces, never appends to, the previous dataset. Genuine identical item rows remain intact.
+An identical re-upload changes nothing. Invalid files leave the saved snapshot unchanged.
+Shorter corrected replacements require explicit admin confirmation. The app cannot prove
+that the export included every transaction, so the supervisor must confirm its scope.
 
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-st.title("🍽️ George & Dragon — Upsell Scoreboard")
-st.caption("Marlow · Floor Team · 5-Week Upsell Incentive")
+### A contribution rate, not a conversion percentage
+Six portions over three assigned tables means 200 portions per 100 tables. Scores above 100
+are valid. Cross-table selling can increase your numerator without increasing your denominator.
+Large groups count as one account, so this is table-relative rather than covers-relative.
+""")
 
-# ---------------------------------------------------------------------------
-# Navigation (top-level tabs, no sidebar for viewers)
-# ---------------------------------------------------------------------------
-tab_leaderboard, tab_weeks, tab_rules, tab_how, tab_admin = st.tabs([
-    "🏆 Leaderboard",
-    "📅 5-Week View",
-    "📋 Rules",
-    "🧮 How It Works",
-    "🔒 Admin",
-])
-
-# Load persistent data once.
-df_raw = load_persisted_data()
-sales = clean_sales(df_raw) if df_raw is not None else None
-today = dt.date.today()
-current_week = current_or_next_week(today)
-
-# ---------------------------------------------------------------------------
-# TAB 1: Leaderboard (current week + overall)
-# ---------------------------------------------------------------------------
-with tab_leaderboard:
-    # Prize hero
-    st.markdown(
-        f"""
-        <div class="prize-hero">
-            <h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
-            <p style="color:#cbd5e1; margin:0;">
-                Highest table-conversion rate wins. Fair. Transparent. Live.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("")
-
-    if sales is None or sales.empty:
-        st.info(
-            "The scoreboard will appear here once the first Zonal upload lands. "
-            "Ask Harry when the first drop is going in."
-        )
-    else:
-        # KPI row
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            week_label = f"Week {current_week.number}"
-            if today < WEEKS[0].start:
-                week_label = "Campaign starts " + WEEKS[0].start.strftime("%d %b")
-            elif today > WEEKS[-1].end:
-                week_label = "Campaign closed"
-            st.markdown(
-                f'<div class="kpi"><h3>Now</h3><p>{week_label}</p></div>',
-                unsafe_allow_html=True,
-            )
-        with k2:
-            st.markdown(
-                f'<div class="kpi"><h3>This week\'s theme</h3>'
-                f'<p style="font-size:1.05rem">{current_week.name}</p></div>',
-                unsafe_allow_html=True,
-            )
-        with k3:
-            st.markdown(
-                f'<div class="kpi"><h3>Weekly prize</h3><p>£{PRIZE_WEEKLY_GBP}</p></div>',
-                unsafe_allow_html=True,
-            )
-        with k4:
-            st.markdown(
-                f'<div class="kpi"><h3>Overall prize</h3><p>£{PRIZE_OVERALL_GBP}</p></div>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("---")
-
-        # This week's leaderboard (only if week is live or closed, not locked)
-        status = week_status(current_week, today)
-        st.subheader(f"This week — {current_week.name}")
-
-        if status == "locked":
-            st.info(f"Week {current_week.number} unlocks on {current_week.start.strftime('%A %d %B')}.")
-        else:
-            board = weekly_leaderboard(sales, current_week)
-            if board.empty:
-                st.info("No activity recorded in this week's data yet.")
+with tabs[4]:
+    st.subheader("Admin")
+    admin_pin = str(secret("admin_pin", ""))
+    entered = st.text_input("Admin PIN", type="password")
+    unlocked = st.session_state.get("admin_authenticated", False)
+    if not admin_pin:
+        st.error("Admin access is disabled until admin_pin is set in Streamlit Secrets.")
+    elif not unlocked:
+        if st.button("Unlock admin"):
+            until = st.session_state.get("locked_until", 0)
+            if time.time() < until:
+                st.error("Too many attempts in this session. Wait a minute.")
+            elif entered and hmac.compare_digest(entered, admin_pin):
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
             else:
-                display_board = board[[
-                    "rank", "Display", "eligible_tables", "tables_with_target",
-                    "conversion_pct", "target_revenue", "status", "is_competitor",
-                ]].rename(columns={
-                    "rank": "#",
-                    "Display": "Server",
-                    "eligible_tables": "Tables",
-                    "tables_with_target": "Hits",
-                    "conversion_pct": "Conversion %",
-                    "target_revenue": "Revenue £",
-                    "status": "Status",
-                })
-
-                def _grey_observers(row):
-                    # Managers (observers) are shown for their own visibility
-                    # but greyed out so the competition list stays visually
-                    # dominant.
-                    if not row["is_competitor"]:
-                        return ["color: #888; font-style: italic"] * len(row)
-                    return [""] * len(row)
-
-                styled = (
-                    display_board.style
-                    .apply(_grey_observers, axis=1)
-                    .format({"Conversion %": "{:.1f}%", "Revenue £": "£{:.2f}",
-                             "#": "{:.0f}"}, na_rep="—")
-                    .background_gradient(
-                        subset=pd.IndexSlice[display_board["is_competitor"], "Conversion %"],
-                        cmap="Greens",
-                    )
-                )
-                # Hide the is_competitor helper column from the rendered view.
-                st.dataframe(
-                    styled,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"is_competitor": None},
-                )
-
-                comp_board = board[board["is_competitor"]]
-                qualified = comp_board[comp_board["status"] == "Qualified"]
-                if not qualified.empty:
-                    top = qualified.iloc[0]
-                    st.success(
-                        f"🥇 Leading this week: **{top['Display']}** — "
-                        f"{top['conversion_pct']:.1f}% conversion "
-                        f"({int(top['tables_with_target'])} of {int(top['eligible_tables'])} tables)."
-                    )
-                else:
-                    st.warning(
-                        f"No competitor has hit the {MIN_TABLES_WEEKLY}-table threshold yet — "
-                        "leaderboard is provisional."
-                    )
-
-        st.markdown("---")
-
-        # Overall standings
-        st.subheader(f"Overall standings — £{PRIZE_OVERALL_GBP} campaign prize")
-        st.caption(
-            "Total ranking points across the 5-week campaign. "
-            "Missed weeks count as zero. No minimum-weeks gate."
-        )
-        overall = overall_leaderboard(sales)
-        if overall.empty:
-            st.info("Standings will populate as weeks close.")
+                attempts = st.session_state.get("pin_attempts", 0) + 1
+                st.session_state["pin_attempts"] = attempts
+                if attempts % 5 == 0:
+                    st.session_state["locked_until"] = time.time() + 60
+                st.error("Incorrect PIN.")
+    if admin_pin and unlocked:
+        if st.button("Lock admin"):
+            st.session_state["admin_authenticated"] = False
+            st.rerun()
+        if st.session_state.get("saved_message"):
+            st.success(st.session_state.pop("saved_message"))
+        st.caption(f"Roster source: {ROSTER_SOURCE}")
+        if load_error:
+            st.error("Resolve the storage/configuration error before editing. No replacement can be saved.")
         else:
-            show = overall.rename(columns={
-                "Display": "Server",
-                "weeks_worked": "Weeks worked",
-                "total_points": "Total pts",
-            })[["Server", "Weeks worked", "Total pts", "is_competitor"]]
-
-            def _grey_observers_overall(row):
-                if not row["is_competitor"]:
-                    return ["color: #888; font-style: italic"] * len(row)
-                return [""] * len(row)
-
-            styled = (
-                show.style
-                .apply(_grey_observers_overall, axis=1)
-                .format({"Total pts": "{:.0f}"})
-                .background_gradient(
-                    subset=pd.IndexSlice[show["is_competitor"], "Total pts"],
-                    cmap="Blues",
-                )
-            )
-            st.dataframe(
-                styled,
-                use_container_width=True,
-                hide_index=True,
-                column_config={"is_competitor": None},
-            )
-
-            comp_overall = overall[overall["is_competitor"]]
-            if not comp_overall.empty:
-                top = comp_overall.iloc[0]
-                st.success(
-                    f"🏆 Provisional overall leader: **{top['Display']}** — "
-                    f"{int(top['total_points'])} total pts across the campaign."
-                )
-
-# ---------------------------------------------------------------------------
-# TAB 2: 5-Week View (with locked future weeks)
-# ---------------------------------------------------------------------------
-with tab_weeks:
-    st.subheader("The 5-week campaign at a glance")
-    st.caption("Each week unlocks on its Monday. Weekly winner = highest conversion % (min 15 tables).")
-
-    for w in WEEKS:
-        status = week_status(w, today)
-
-        with st.container():
-            cols = st.columns([1, 4, 1])
-            with cols[0]:
-                icon = {"locked": "🔒", "live": "🟢", "closed": "✅"}[status]
-                st.markdown(f"### {icon} Week {w.number}")
-                st.caption(f"{w.start.strftime('%a %d %b')} → {w.end.strftime('%a %d %b')}")
-            with cols[1]:
-                st.markdown(f"**{w.name}**")
-                if status == "locked":
-                    st.markdown(
-                        f'<div class="locked-card">Unlocks {w.start.strftime("%A %d %B")} — items revealed on the day.</div>',
-                        unsafe_allow_html=True,
+            if not durable:
+                st.info("Configure [storage] repo and token in Streamlit Secrets. Never put a token or transaction file in the public code repo.")
+            st.subheader("Replace cumulative data")
+            upload = st.file_uploader("Full cumulative Zonal CSV from 14 September", type="csv")
+            complete = st.checkbox("I confirm this is the complete cumulative export, not a daily or filtered file.")
+            reduction = st.checkbox("This is an intentional corrected replacement that may remove earlier rows/accounts.")
+            if st.button("Validate and replace", disabled=upload is None or not complete or store is None):
+                try:
+                    candidate, changed = replacement_state(state, upload.getvalue(), reduction, today)
+                    if changed:
+                        save_state(candidate, "Cumulative snapshot saved to private storage.")
+                    else:
+                        st.info("Identical data already saved; no changes made.")
+                except Exception as exc:
+                    st.error(f"Upload rejected; previous snapshot unchanged: {exc}")
+            if state["csv"]:
+                st.download_button("Download private scoring-data backup", state["csv"],
+                                   "scoreboard-private-backup.csv", "text/csv")
+            if result is not None:
+                st.subheader("Accounts requiring review")
+                pending = result.accounts[result.accounts["issues"].ne("")]
+                st.dataframe(pending.drop(columns="fingerprint"), hide_index=True, use_container_width=True)
+                options = result.accounts["account_id"].tolist()
+                if options:
+                    account_id = st.selectbox("Account to inspect or correct", options)
+                    details = result.accounts[result.accounts["account_id"].eq(account_id)].iloc[0]
+                    account = raw[raw["Account ID"].eq(account_id)]
+                    st.dataframe(account, hide_index=True, use_container_width=True)
+                    previous = state["reviews"].get(str(account_id), {})
+                    owner_options = ["Use automatic ownership", EXCLUDED_OWNER] + sorted(set(ELIGIBLE_ROSTER.values()))
+                    selected_owner = st.selectbox("Confirmed owner", owner_options, key=f"owner_{account_id}")
+                    settled = st.checkbox("I verified settlement despite missing ordinary payment evidence", key=f"settled_{account_id}")
+                    preorder = st.checkbox("This is a confirmed preorder", value=bool(previous.get("preorder")), key=f"pre_{account_id}")
+                    targets_ok = st.checkbox("For later weeks, I verified which preorder items were genuine extra upsells", key=f"target_{account_id}")
+                    excluded = st.checkbox("Exclude this account entirely, including all item credit", key=f"exclude_{account_id}")
+                    note = st.text_input("Review evidence / reason (required)", key=f"note_{account_id}")
+                    final_text = st.text_area(
+                        "Verified final sales JSON (optional; required for relevant corrections/transfers)",
+                        value=json.dumps(previous.get("final_sales"), indent=2) if previous.get("final_sales") is not None else "",
+                        key=f"final_{account_id}",
+                        help='A full replacement list for this account: [{"Date":"2026-09-14","Employee":"exact Zonal name","Description":"exact product","Quantity":1,"Sales Amount":5.0}]. Preserve original sale-entry credit. Use [] only when no valid sales remain.',
                     )
-                else:
-                    st.caption("Target items: " + ", ".join(w.items))
-            with cols[2]:
-                if status == "locked":
-                    st.markdown("`Locked`")
-                elif status == "live":
-                    st.markdown("**Live now**")
-                else:
-                    st.markdown("Closed")
+                    if st.button("Save reviewed account", disabled=store is None):
+                        try:
+                            if not note.strip():
+                                raise ValueError("Add an evidence note before saving the review.")
+                            review = dict(fingerprint=details["fingerprint"], note=note.strip(),
+                                          settlement_confirmed=settled, preorder=preorder,
+                                          preorder_targets_confirmed=targets_ok, exclude=excluded,
+                                          reviewed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                            if selected_owner != "Use automatic ownership":
+                                review["owner"] = selected_owner
+                            if final_text.strip():
+                                review["final_sales"] = json.loads(final_text)
+                            if targets_ok and review.get("final_sales") is None:
+                                raise ValueError("Provide verified final sales containing only eligible preorder upsells and valid main evidence.")
+                            new = copy.deepcopy(state)
+                            new["reviews"][str(account_id)] = review
+                            save_state(new, "Account review saved. Any subsequent account changes expire this review.")
+                        except Exception as exc:
+                            st.error(f"Review not saved: {exc}")
+                with st.expander("Unmapped product review catalogue"):
+                    st.caption("Not every unmapped product is an error: drinks and modifiers are expected. Review potential missing mains.")
+                    st.dataframe(result.unknown_products, hide_index=True, use_container_width=True)
+            st.subheader("Effective-dated menu configuration")
+            st.caption("Add confirmed new periods without overwriting historical mappings. No overlapping date ranges.")
+            menu_text = st.text_area("Menu JSON", value=json.dumps(state["menus"], indent=2), height=300)
+            historical = st.checkbox("I intend to correct historical menu rules and have reviewed the effect on previous scores.")
+            if st.button("Save menu mappings", disabled=store is None):
+                try:
+                    proposed = validate_menus(json.loads(menu_text))
+                    if not historical:
+                        for old in state["menus"]:
+                            if dt.date.fromisoformat(old["start"]) <= today and old not in proposed:
+                                raise ValueError("Existing historical rules changed; confirm a deliberate correction first.")
+                    new = copy.deepcopy(state)
+                    new["menus"] = proposed
+                    save_state(new, "Dated menu mappings saved.")
+                except Exception as exc:
+                    st.error(f"Menus not saved: {exc}")
 
-            # Board only if unlocked and we have data
-            if status != "locked" and sales is not None and not sales.empty:
-                board = weekly_leaderboard(sales, w)
-                if not board.empty:
-                    # Competitors only in the 5-week compact view. Observers
-                    # (managers) live on the main Leaderboard tab, not here.
-                    comp_only = board[board["is_competitor"]]
-                    top3 = comp_only.head(3)[["rank", "Display", "conversion_pct",
-                                              "tables_with_target", "eligible_tables", "status"]]
-                    top3 = top3.rename(columns={
-                        "rank": "#", "Display": "Server",
-                        "conversion_pct": "Conv %",
-                        "tables_with_target": "Hits",
-                        "eligible_tables": "Tables",
-                        "status": "Status",
-                    })
-                    st.dataframe(
-                        top3.style.format({"Conv %": "{:.1f}%", "#": "{:.0f}"}, na_rep="—"),
-                        use_container_width=True, hide_index=True,
-                    )
-            st.markdown("---")
-
-# ---------------------------------------------------------------------------
-# TAB 3: Rules
-# ---------------------------------------------------------------------------
-with tab_rules:
-    st.subheader("The rules — read once, ask if unclear")
-
-    st.markdown(
-        f"""
-        <div class="rule-card">
-            <h4>£{PRIZE_WEEKLY_GBP} weekly prize</h4>
-            <p>Awarded to the server with the <b>highest table-conversion rate</b> in a given week.
-            Minimum <b>{MIN_TABLES_WEEKLY} eligible tables</b> served that week to qualify —
-            this stops one lucky big-spend table skewing a small sample.</p>
-        </div>
-        <div class="rule-card">
-            <h4>£{PRIZE_OVERALL_GBP} overall prize</h4>
-            <p>Awarded at the end of the 5 weeks to the server with the <b>most total ranking points</b>
-            across the whole campaign. No minimum-weeks requirement — whatever you work, you work.
-            Missed or below-threshold weeks count as <b>0 points</b>, not N/A.</p>
-        </div>
-        <div class="rule-card">
-            <h4>What counts as a "hit"</h4>
-            <p>Each week has a theme (nibbles, starters, sides, desserts, coffees & digestives).
-            A table counts as a hit if it orders <b>one or more</b> of that week's target items.
-            Two hits on one table still counts as one — we're measuring whether you <b>created the opportunity</b>,
-            not upselling volume per table.</p>
-        </div>
-        <div class="rule-card">
-            <h4>Conversion rate = fairness</h4>
-            <p>Conversion % = (tables with a hit) ÷ (eligible tables you served) × 100.
-            A part-timer with 20 tables and 8 hits (40%) beats a full-timer with 60 tables and 18 hits (30%).
-            Time on the floor doesn't win — technique does.</p>
-        </div>
-        <div class="rule-card">
-            <h4>What's excluded</h4>
-            <p>Voids, wastage, staff meals, payments-only lines, zero-cover orders (breakfast/rooms), and
-            any employee not on the competition roster. Only genuine sales to genuine restaurant covers count.</p>
-        </div>
-        <div class="rule-card">
-            <h4>Weekly ranking points (feeds the overall)</h4>
-            <p>1st = 80 · 2nd = 70 · 3rd = 60 · 4th = 50 · 5th = 40 · 6th = 30 · 7th = 20 · 8th = 10.
-            Qualified but below 8th = 10 pts. Below the {MIN_TABLES_WEEKLY}-table threshold or absent = 0.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# ---------------------------------------------------------------------------
-# TAB 4: How It Works (deeper breakdown)
-# ---------------------------------------------------------------------------
-with tab_how:
-    st.subheader("How the scoreboard is calculated")
-    st.markdown(
-        """
-        ### 1. The data source
-        All numbers come from the **Zonal Detailed Transaction Report** — the same data
-        that runs the till. No manual counting, no self-reporting, no arguing with the
-        board over "I did more than that".
-
-        Harry uploads a fresh export as often as possible (daily or weekly). Each upload
-        is merged into the running store, with duplicates automatically stripped.
-
-        ### 2. Cleaning the data
-        Every raw upload gets filtered down to:
-        - **Type = "Sale"** only (no voids, no wastage, no payment-only lines)
-        - **Employees on the competition roster** only
-        - **Covers > 0** only (excludes breakfast, rooms, functions)
-
-        ### 3. Building "table opportunities"
-        Zonal has one row per menu-item line, and Zonal generates multiple
-        `Order No`s for a single physical table (each time the till re-opens a tab,
-        adds a course, or splits the bill). To count real tables we collapse to one
-        row per unique `(Date, Table, Server)` — that's one **physical table**,
-        one chance to upsell, regardless of how many separate order numbers Zonal
-        stamped it with. Sales with no `Table` label (bar, iOrder, room service) are excluded.
-
-        ### 4. Counting hits
-        For each week's theme, we look at which table opportunities contain **at least one**
-        of that week's target items. A table with three Prawn Cocktails = **one hit**, not three.
-
-        ### 5. Ranking
-        ```
-        conversion % = (tables with ≥1 target item) / (eligible tables) × 100
-        ```
-        The board sorts on conversion %. Ties broken by target-item revenue.
-
-        ### 6. Weekly prize
-        Highest conversion % **among qualified servers** (≥15 eligible tables) wins the £10.
-        Below 15 tables = "Building sample" — visible on the board but not prize-eligible for that week.
-
-        ### 7. Overall prize
-        Each weekly rank gives points (1st=80 down to 8th=10). Points are summed across
-        all 5 weeks. **Highest total wins the £50.** Absence or below-threshold counts as 0
-        — no exceptions, no adjustments. Work more weeks, bank more points.
-
-        ### 8. Why it's honest
-        - **Sample floor** stops a lucky Tuesday winning
-        - **Table-level conversion** stops volume gaming
-        - **Same data everyone sees** — Zonal, not Harry's judgement
-        - **Weeks auto-unlock** so nobody sees the board before it's fair to publish
-        """
-    )
-
-    st.markdown("---")
-    st.caption(
-        "Questions or a number that looks wrong? Grab Harry on shift — the raw data is "
-        "in the Zonal report and the calculation is above. Nothing hidden."
-    )
-
-# ---------------------------------------------------------------------------
-# TAB 5: Admin (PIN-gated — CSV upload)
-# ---------------------------------------------------------------------------
-with tab_admin:
-    st.subheader("Admin — upload new Zonal data")
-    st.caption("PIN-protected. Only Harry uploads. Everyone else, back to the leaderboard.")
-
-    pin_input = st.text_input("Admin PIN", type="password", key="admin_pin_input")
-
-    if pin_input == "":
-        st.info("Enter the admin PIN to unlock upload.")
-    elif pin_input != ADMIN_PIN:
-        st.error("Wrong PIN.")
-    else:
-        st.success("Admin unlocked.")
-
-        st.markdown("### Upload Zonal Detailed Transaction Report")
-        st.caption(
-            "Same CSV format as always. Drop the day's or the week's export — "
-            "duplicates are stripped automatically. Multiple uploads accumulate."
-        )
-        upload = st.file_uploader(
-            "Zonal export (.csv)",
-            type=["csv"],
-            accept_multiple_files=False,
-        )
-        if upload is not None:
-            try:
-                new_raw = pd.read_csv(upload, low_memory=False)
-                combined = append_upload(new_raw)
-                st.success(
-                    f"Merged. Combined store now has {len(combined):,} rows across "
-                    f"{combined['Date'].nunique() if 'Date' in combined else '?'} unique dates."
-                )
-                st.info("Refresh the Leaderboard tab to see the new numbers.")
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
-
-        st.markdown("---")
-        st.markdown("### Roster source")
-        st.write(f"Loaded from: **{ROSTER_SOURCE}**  \u2014  {len(ELIGIBLE_ROSTER)} names")
-        if ROSTER_SECRETS_ERROR:
-            st.error(f"Streamlit Secrets error: {ROSTER_SECRETS_ERROR}")
-        with st.expander("Show loaded roster (Zonal name \u2192 display name)"):
-            st.json(dict(ELIGIBLE_ROSTER))
-
-        st.markdown("---")
-        st.markdown("### Current data store")
-        if sales is None or df_raw is None:
-            st.info("No data uploaded yet.")
-        else:
-            diag = diagnostics(df_raw)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total rows", f"{diag['rows_total']:,}")
-            c2.metric("Sale rows", f"{diag['sale_rows']:,}")
-            c3.metric("Date range",
-                      f"{diag['date_min']} → {diag['date_max']}"
-                      if diag['date_min'] else "—")
-
-            if diag["unmapped_employees"]:
-                st.warning(
-                    "Sale employees NOT in the eligible roster. Add them to "
-                    "`src/config.py`, `src/roster_local.py`, or Streamlit Cloud "
-                    "Secrets (`[[roster]]` array-of-tables) if they should be on the board:"
-                )
-                st.write(diag["unmapped_employees"])
-            else:
-                st.success("All sale employees mapped to the roster.")
-
-        st.markdown("---")
-        st.markdown("### Danger zone")
-        if st.button("🗑️  Reset all uploaded data", type="secondary"):
-            if COMBINED_CSV.exists():
-                COMBINED_CSV.unlink()
-                st.success("Store wiped. Refresh to confirm.")
-            else:
-                st.info("Nothing to wipe.")
-
-# ---------------------------------------------------------------------------
-# Footer
-# ---------------------------------------------------------------------------
-st.markdown("---")
-st.caption(
-    "George & Dragon Marlow · Heartwood Collection · "
-    "5-week upsell campaign · Numbers from Zonal · Questions to Harry"
-)
+st.divider()
+st.caption("George & Dragon Marlow · Heartwood Collection · Zonal transaction evidence · Questions to Harry")

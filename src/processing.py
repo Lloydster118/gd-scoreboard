@@ -1,314 +1,323 @@
+"""Account-based scoring, retaining payment and exception evidence.
+
+Ambiguous correction/transfer semantics are never guessed. A reviewed account
+can supply its verified final sales, with a fingerprint that expires on change.
 """
-Data processing for the Zonal Detailed Transaction Report.
-
-The Zonal export has one row per menu-item line inside an order. To score
-fairly we need to reduce this to:
-  1. A clean sales-only transaction dataset (no voids/waste/payments).
-  2. A table-level opportunity view: (order, employee, date) with a single
-     Covers value per order.
-  3. Per-week aggregates that count each qualifying table once, so a table
-     with two Prawn Cocktails only counts as one converted opportunity.
-
-Everything downstream reads these three views.
-"""
-
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
-from typing import Iterable
+import hashlib
+import io
+import json
 
 import pandas as pd
 
 from .config import (
-    ELIGIBLE_ROSTER,
-    COMPETITORS,
-    OBSERVERS,
-    VALID_SALE_TYPES,
-    WEEKS,
-    WeekTheme,
-    MIN_TABLES_WEEKLY,
-    RANK_POINTS,
-    DEFAULT_RANK_POINTS,
-    UNQUALIFIED_POINTS,
+    ELIGIBLE_ROSTER, COMPETITORS, WEEKS, MIN_TABLES_WEEKLY,
+    RANK_POINTS, DEFAULT_RANK_POINTS, CAMPAIGN_START,
 )
+from .menus import DEFAULT_MENUS, is_staff_food, menu_on, validate_menus
 
 REQUIRED_COLS = {
-    "Date", "Time", "Order No", "Type", "Description",
+    "Date", "Time", "Order No", "Account ID", "Type", "Description",
     "Employee", "Table", "Covers", "Quantity", "Sales Amount",
 }
+STORED_COLS = sorted(REQUIRED_COLS | {"Payment Amount"})
+SAFE_TYPES = {"Sale", "Payment", "Discount", "Correcte d Discount"}
+SALE_FIELDS = ["Date", "Employee", "Description", "Quantity", "Sales Amount"]
+EXCLUDED_OWNER = "(outside competition roster)"
 
 
-def load_transactions(source) -> pd.DataFrame:
-    """Load a Zonal CSV (path, file-like or bytes) into a normalised frame."""
-    df = pd.read_csv(source, low_memory=False)
-    df.columns = [c.strip() for c in df.columns]
-    missing = REQUIRED_COLS - set(df.columns)
+def load_transactions(source):
+    if isinstance(source, bytes):
+        source = io.BytesIO(source)
+    df = pd.read_csv(source, dtype=str, keep_default_na=False)
+    df.columns = df.columns.str.strip()
+    if df.columns.duplicated().any():
+        raise ValueError("Duplicate CSV column names.")
+    missing = REQUIRED_COLS - set(df)
     if missing:
         raise ValueError(f"CSV missing required columns: {sorted(missing)}")
-
-    # Parse date/time
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce").dt.date
-
-    # Sales amount comes through as strings with quotes on some exports.
-    df["Sales Amount"] = pd.to_numeric(df["Sales Amount"], errors="coerce").fillna(0.0)
-    df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0).astype(int)
-    df["Covers"] = pd.to_numeric(df["Covers"], errors="coerce").fillna(0).astype(int)
-
-    df["Employee"] = df["Employee"].astype(str).str.strip()
-    df["Description"] = df["Description"].astype(str).str.strip()
-    df["Type"] = df["Type"].astype(str).str.strip()
-
-    return df
-
-
-def clean_sales(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep genuine positive sales for the eligible roster only.
-
-    Every row's `Display` is looked up through ELIGIBLE_ROSTER, which maps
-    any Zonal alias to the single canonical person name. This is where the
-    many-to-one collapse happens — downstream code groups by `Display`,
-    never `Employee`, so duplicate Zonal profiles score as one person.
-    """
-    eligible = set(ELIGIBLE_ROSTER)
-    sales = df[
-        df["Type"].isin(VALID_SALE_TYPES)
-        & df["Employee"].isin(eligible)
-        & (df["Quantity"] > 0)
-    ].copy()
-    sales["Display"] = sales["Employee"].map(ELIGIBLE_ROSTER)
-    return sales
+    if df.empty:
+        raise ValueError("The export contains no transactions.")
+    for col in REQUIRED_COLS:
+        df[col] = df[col].str.strip()
+    parsed = pd.to_datetime(df["Date"], format="mixed", dayfirst=True, errors="coerce")
+    if parsed.isna().any():
+        raise ValueError("Invalid or missing transaction dates.")
+    df["Date"] = parsed.dt.date
+    for col in ("Covers", "Quantity", "Sales Amount", "Payment Amount"):
+        if col not in df:
+            df[col] = "0"
+        text = df[col].str.strip().replace("", "0")
+        commas = text.str.contains(",", regex=False)
+        valid_grouped = text.str.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+        if (commas & ~valid_grouped).any():
+            raise ValueError(f"Invalid thousands separators in {col}.")
+        values = pd.to_numeric(text.str.replace(",", "", regex=False), errors="coerce")
+        if values.isna().any() or not values.map(lambda x: float("-inf") < x < float("inf")).all():
+            raise ValueError(f"Invalid numeric values in {col}.")
+        if col in ("Covers", "Quantity") and (values % 1 != 0).any():
+            raise ValueError(f"{col} must contain whole numbers.")
+        df[col] = values
+    if (df["Covers"] < 0).any():
+        raise ValueError("Negative covers need source-data correction.")
+    if df["Account ID"].eq("").any():
+        raise ValueError("Missing Account ID; cannot safely identify visits.")
+    return df[STORED_COLS].copy()
 
 
-def build_table_view(sales: pd.DataFrame) -> pd.DataFrame:
-    """One row per (Date, Table, Display) — the true PHYSICAL table view.
+def validate_replacement(new, old=None, allow_reduction=False, today=None):
+    """Validate before any persistence. Never append or deduplicate item rows."""
+    today = today or date.today()
+    if new["Date"].min() != CAMPAIGN_START:
+        raise ValueError("Upload a complete cumulative export starting 14 September 2026.")
+    if new["Date"].max() > today:
+        raise ValueError("The export contains future-dated transactions.")
+    if old is not None and not allow_reduction:
+        if new["Date"].max() < old["Date"].max():
+            raise ValueError("The new export ends earlier than the saved export.")
+        if not set(old["Account ID"]).issubset(set(new["Account ID"])):
+            raise ValueError("Previously uploaded accounts are missing.")
+        before = old.groupby("Date").size()
+        after = new.groupby("Date").size().reindex(before.index, fill_value=0)
+        if (after < before).any():
+            raise ValueError("Some dates contain fewer rows; confirm a deliberate corrected replacement.")
+    return new
 
-    A single physical table generates multiple `Order No`s in Zonal: every
-    time the till re-opens the tab, adds a course, or splits/transfers the
-    bill it stamps a new order number, so grouping by Order No massively
-    over-counts (a 4-cover table can look like 4 or 5 separate orders).
 
-    Group by (Date, Table, Display) instead: one physical table served by
-    one person on one date = one row. Covers = max across all that
-    table's rows (Zonal repeats the value on every line). Rows with no
-    Table label or with zero covers are excluded — that's iOrder, bar,
-    room service, and other non-restaurant sales.
-    """
-    df = sales.copy()
-    df["Table"] = df["Table"].astype(str).str.strip()
-    df = df[df["Table"].notna() & (df["Table"] != "") & (df["Table"].str.lower() != "nan")]
-    grouped = (
-        df.groupby(["Date", "Table", "Display"], as_index=False)
-        .agg(covers=("Covers", "max"),
-             lines=("Quantity", "count"),
-             revenue=("Sales Amount", "sum"),
-             order_nos=("Order No", "nunique"))
+def fingerprint(account):
+    stable = account[STORED_COLS].astype(str).to_dict("records")
+    lines = sorted(json.dumps(r, sort_keys=True) for r in stable)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+@dataclass
+class ScoringResult:
+    accounts: pd.DataFrame
+    credits: pd.DataFrame
+    unknown_products: pd.DataFrame
+
+
+def _reviewed_sales(review, account):
+    final = review.get("final_sales")
+    if final is None:
+        return None
+    if not isinstance(final, list):
+        raise ValueError("final_sales must be a list.")
+    result = pd.DataFrame(final, columns=SALE_FIELDS)
+    if result.empty:
+        return result
+    result["Date"] = result["Date"].map(lambda x: date.fromisoformat(str(x)))
+    if not result["Date"].isin(account["Date"]).all():
+        raise ValueError("Reviewed sale dates must exist on this account.")
+    for col in ("Quantity", "Sales Amount"):
+        result[col] = pd.to_numeric(result[col], errors="raise")
+        if not result[col].map(lambda x: float("-inf") < x < float("inf")).all():
+            raise ValueError("Reviewed sales must be finite.")
+    if (result["Quantity"] < 0).any() or (result["Quantity"] % 1 != 0).any():
+        raise ValueError("Reviewed quantities must be nonnegative whole portions.")
+    for col in ("Employee", "Description"):
+        if not result[col].map(lambda x: isinstance(x, str) and bool(x.strip())).all():
+            raise ValueError("Reviewed sales need exact employee and product names.")
+    return result
+
+
+def score_accounts(raw, menus=None, reviews=None, roster=None):
+    menus = validate_menus(DEFAULT_MENUS if menus is None else menus)
+    reviews = reviews or {}
+    roster = ELIGIBLE_ROSTER if roster is None else roster
+    accounts, credits, unknown = [], [], []
+    for account_id, account in raw.groupby("Account ID", sort=False):
+        original = account[(account["Type"] == "Sale") & (account["Quantity"] > 0)]
+        original = original[~original["Description"].map(is_staff_food)]
+        if original.empty:
+            continue
+        day = original["Date"].min()
+        if not any(w.start <= day <= w.end for w in WEEKS):
+            continue
+        tables = sorted(set(original["Table"]) - {"", "nan", "None"})
+        covers_values = set(original.loc[original["Covers"] > 0, "Covers"])
+        covers = max(covers_values, default=0)
+        if not tables or covers <= 0:
+            continue
+        fp = fingerprint(account)
+        supplied = reviews.get(str(account_id), {})
+        review = supplied if supplied.get("fingerprint") == fp and supplied.get("note", "").strip() else {}
+        issues, blockers = [], []
+        if supplied and not review:
+            issues.append("Review expired: account changed or note missing")
+        if review.get("exclude", False):
+            accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
+                                 covers=covers, owner=None, counted=False, credit_allowed=False,
+                                 issues="Excluded by review", fingerprint=fp))
+            continue
+        settled = (account["Type"].eq("Payment") & account["Payment Amount"].gt(0)).any()
+        deposit = (account["Type"].eq("Ledger") & account["Description"].eq("Deposit Red")
+                   & account["Payment Amount"].gt(0)).any()
+        if not settled and not review.get("settlement_confirmed"):
+            blockers.append("Deposit redemption needs settlement review" if deposit else "No positive payment evidence")
+        if account["Type"].eq("Reverse Pay").any() and not review.get("settlement_confirmed"):
+            blockers.append("Reversed payment needs settlement confirmation")
+        # Ignore unrelated operational corrections, but hold corrections to any
+        # main/target on the relevant date, all transfers, and reversed payments.
+        correction = False
+        for _, row in account.iterrows():
+            if row["Type"] in SAFE_TYPES and not (row["Type"] == "Sale" and row["Quantity"] < 0):
+                continue
+            if is_staff_food(row["Description"]):
+                continue
+            menu = menu_on(row["Date"], menus)
+            relevant = bool(menu and (row["Description"] in menu["mains"] or
+                            any(row["Description"] in x for x in menu["targets"].values())))
+            transfer = any(x in row["Type"].lower() for x in ("merged", "moved", "split", "reverse", "refund"))
+            if relevant or transfer:
+                correction = True
+        final_sales = _reviewed_sales(review, account) if review else None
+        if correction and final_sales is None:
+            blockers.append("Corrections/transfers: verified final sales required")
+        sales = original[SALE_FIELDS].copy() if final_sales is None else final_sales.copy()
+        sales = sales[~sales["Description"].map(is_staff_food)]
+        owner_weights = {}
+        missing_menu = False
+        for _, row in sales.iterrows():
+            menu = menu_on(row["Date"], menus)
+            if menu is None:
+                missing_menu = True
+                unknown.append(dict(Date=row["Date"], Description=row["Description"], reason="No confirmed menu"))
+                continue
+            weight = menu["mains"].get(row["Description"], 0)
+            if weight:
+                person = roster.get(row["Employee"], EXCLUDED_OWNER + ": " + row["Employee"])
+                owner_weights[person] = owner_weights.get(person, 0) + row["Quantity"] * weight
+            elif row["Description"] not in set(sum(menu["targets"].values(), [])):
+                unknown.append(dict(Date=row["Date"], Description=row["Description"],
+                                    reason="Not mapped as main or confirmed target; may be drink/modifier"))
+        if missing_menu:
+            blockers.append("No confirmed menu for sale date")
+        for sale_day in set(sales["Date"]):
+            active = next((w for w in WEEKS if w.start <= sale_day <= w.end), None)
+            mapping = menu_on(sale_day, menus)
+            if active and mapping and str(active.number) not in mapping["targets"]:
+                blockers.append(f"Week {active.number} targets not confirmed")
+        sale_weeks = {w.number for w in WEEKS if sales["Date"].between(w.start, w.end).any()}
+        if len(sale_weeks) > 1:
+            blockers.append("Account spans incentive weeks; check source Account ID")
+        owner = None
+        if owner_weights:
+            highest = max(owner_weights.values())
+            winners = [p for p, qty in owner_weights.items() if qty == highest]
+            if len(winners) == 1:
+                owner = winners[0]
+            else:
+                issues.append("Tied main-course ownership")
+        else:
+            issues.append("No recognised main-course ownership")
+        preorder = original["Description"].isin(["Pre-Order Dinner", "Group Dining 3CR"]).any()
+        # Confirmed private operational exception, configured as a review rather
+        # than hard-coding any real customer's account in public source.
+        if review.get("preorder"):
+            preorder = True
+        if preorder:
+            issues.append("Preorder: serving owner needs confirmation")
+            owner = None
+            if any(w.number > 1 and sales["Date"].between(w.start, w.end).any() for w in WEEKS):
+                if not review.get("preorder_targets_confirmed") or final_sales is None:
+                    blockers.append("Preselected courses: verified target eligibility and final sales required")
+        if len(tables) > 1 or len(covers_values) > 1 or sum(owner_weights.values()) > covers:
+            issues.append("Table/cover/main-portion inconsistency")
+            owner = None
+        override = review.get("owner")
+        if override:
+            if override not in set(roster.values()) | {EXCLUDED_OWNER}:
+                raise ValueError("Reviewed owner is not in the current roster.")
+            owner = override
+            issues = [x for x in issues if x.startswith("Review expired")]
+        if owner and owner.startswith(EXCLUDED_OWNER):
+            owner = EXCLUDED_OWNER
+        if owner is None:
+            issues.append("Owner unresolved; denominator held")
+        # Missing owners must not silently improve another person's rate:
+        # affected weeks are explicitly provisional until reviewed.
+        issues.extend(blockers)
+        credit_allowed = not blockers
+        if credit_allowed:
+            for _, row in sales.iterrows():
+                week = next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None)
+                menu = menu_on(row["Date"], menus)
+                if week is None or menu is None:
+                    continue
+                if str(week.number) not in menu["targets"]:
+                    issues.append(f"Week {week.number} targets not confirmed")
+                    continue
+                if preorder and week.number > 1 and not review.get("preorder_targets_confirmed"):
+                    issues.append("Preselected courses: target eligibility needs review")
+                    continue
+                if row["Description"] in menu["targets"][str(week.number)] and row["Quantity"] > 0:
+                    person = roster.get(row["Employee"])
+                    if person:
+                        credits.append(dict(account_id=account_id, Date=row["Date"], week=week.number,
+                                            Display=person, target_units=row["Quantity"],
+                                            target_revenue=row["Sales Amount"]))
+        accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
+                             covers=covers, owner=owner, counted=bool(owner) and not blockers,
+                             credit_allowed=credit_allowed, issues="; ".join(dict.fromkeys(issues)),
+                             fingerprint=fp))
+    return ScoringResult(
+        pd.DataFrame(accounts, columns=["account_id", "Date", "table", "covers", "owner",
+                                       "counted", "credit_allowed", "issues", "fingerprint"]),
+        pd.DataFrame(credits, columns=["account_id", "Date", "week", "Display",
+                                      "target_units", "target_revenue"]),
+        pd.DataFrame(unknown, columns=["Date", "Description", "reason"]).drop_duplicates(),
     )
-    # Restaurant tables only: exclude zero-cover rows (bar / room service).
-    grouped = grouped[grouped["covers"] > 0]
-    return grouped
 
 
-def _week_of(d: date) -> WeekTheme | None:
-    for w in WEEKS:
-        if w.start <= d <= w.end:
-            return w
-    return None
-
-
-def tables_with_target_hit(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
-    """Return distinct (Date, Table, Display) tables that bought ≥1 target item this week.
-
-    Uses the same physical-table identity as build_table_view: (Date, Table, Display).
-    A table with three of that week's target items still counts as one converted
-    table — we measure whether the server opened the upsell opportunity, not volume.
-    """
-    df = sales.copy()
-    df["Table"] = df["Table"].astype(str).str.strip()
-    mask = (
-        (df["Date"] >= week.start)
-        & (df["Date"] <= week.end)
-        & (df["Description"].isin(week.items))
-        & df["Table"].notna() & (df["Table"] != "") & (df["Table"].str.lower() != "nan")
-    )
-    hits = df.loc[mask, ["Date", "Table", "Display"]].drop_duplicates()
-    return hits
-
-
-def weekly_leaderboard(sales: pd.DataFrame, week: WeekTheme) -> pd.DataFrame:
-    """Compute the £10 leaderboard for a single week.
-
-    Metric: conversion rate = (tables with >=1 target item) / (eligible tables served).
-    Sub-metric: incremental revenue = sum(Sales Amount for target items) / eligible tables.
-
-    Observers (managers marked competitor=False in the roster) appear on the
-    board with the same computed metrics but are excluded from ranking and
-    from prize-point allocation — status = "Not competing", points = 0.
-    """
-    tv = build_table_view(sales)
-    week_tv = tv[(tv["Date"] >= week.start) & (tv["Date"] <= week.end)]
-
-    # Aggregate at the DISPLAY level, not the raw Employee alias. This is what
-    # merges Jess's two Zonal profiles and Yasmin's two Zonal profiles into
-    # one row on the board.
-    per_server = (
-        week_tv.groupby(["Display"], as_index=False)
-        .agg(eligible_tables=("Table", "count"),
-             covers=("covers", "sum"))
-    )
-
-    hits = tables_with_target_hit(sales, week)
-    per_server_hits = (
-        hits.groupby(["Display"], as_index=False)
-        .agg(tables_with_target=("Table", "count"))
-    )
-    board = per_server.merge(per_server_hits, on=["Display"], how="left")
-    board["tables_with_target"] = board["tables_with_target"].fillna(0).astype(int)
-
-    # Target revenue (for secondary sort / display).
-    mask = (
-        (sales["Date"] >= week.start)
-        & (sales["Date"] <= week.end)
-        & (sales["Description"].isin(week.items))
-    )
-    rev = (
-        sales.loc[mask]
-        .groupby(["Display"], as_index=False)
-        .agg(target_revenue=("Sales Amount", "sum"),
-             target_units=("Quantity", "sum"))
-    )
-    board = board.merge(rev, on=["Display"], how="left")
-    board[["target_revenue", "target_units"]] = board[["target_revenue", "target_units"]].fillna(0)
-
-    board["conversion_pct"] = (
-        board["tables_with_target"] / board["eligible_tables"].where(board["eligible_tables"] > 0)
-    ).fillna(0) * 100
-
-    # Split competitors vs observers up-front. Observers keep their metrics
-    # for visibility but are never ranked, always sorted to the bottom.
-    board["is_competitor"] = board["Display"].isin(COMPETITORS)
-    board["status"] = [
-        _status_label(t) if c else "Not competing"
-        for t, c in zip(board["eligible_tables"], board["is_competitor"])
-    ]
-
-    # Sort order:
-    #   1. Competitors above observers.
-    #   2. Within competitors: Qualified first (ranked), then Building sample
-    #      (unranked, sorted by their own conversion% for a preview), then
-    #      No recorded shift last.
-    #   3. Within each status group: highest conversion% first, then revenue.
-    status_order = {"Qualified": 0, "Building sample": 1, "No recorded shift": 2, "Not competing": 3}
-    board["_status_rank"] = board["status"].map(status_order).fillna(9).astype(int)
-    board = board.sort_values(
-        ["is_competitor", "_status_rank", "conversion_pct", "target_revenue"],
-        ascending=[False, True, False, False],
-    ).reset_index(drop=True)
-    board = board.drop(columns=["_status_rank"])
-
-    # Rank only qualified competitor rows.
-    qualified_mask = board["status"] == "Qualified"
-    board["rank"] = None
-    board.loc[qualified_mask, "rank"] = range(1, qualified_mask.sum() + 1)
-    if len(board) == 0:
-        board["points"] = pd.Series(dtype=int)
-    else:
-        board["points"] = board.apply(_points_for_row, axis=1).astype(int)
+def weekly_leaderboard(result, week, roster=None, competitors=None):
+    roster = ELIGIBLE_ROSTER if roster is None else roster
+    competitors = COMPETITORS if competitors is None else competitors
+    accounts = result.accounts
+    accounts = accounts[accounts["Date"].between(week.start, week.end)]
+    units = result.credits[result.credits["week"] == week.number]
+    rows = []
+    for person in sorted(set(roster.values())):
+        owned = accounts[accounts["counted"] & accounts["owner"].eq(person)]
+        own_units = units[units["Display"].eq(person)]
+        n, qty = len(owned), own_units["target_units"].sum()
+        status = ("Not competing" if person not in competitors else
+                  "Qualified" if n >= MIN_TABLES_WEEKLY else
+                  "Building sample" if n else "Rate unavailable" if qty else "No recorded shift")
+        rows.append(dict(Display=person, eligible_tables=n, target_units=qty,
+                         target_revenue=own_units["target_revenue"].sum(),
+                         portions_per_100_tables=qty / n * 100 if n else float("nan"),
+                         status=status, is_competitor=person in competitors))
+    board = pd.DataFrame(rows)
+    if board.empty:
+        return board
+    order = {"Qualified": 0, "Building sample": 1, "Rate unavailable": 2,
+             "No recorded shift": 3, "Not competing": 4}
+    board["_sort"] = board["status"].map(order)
+    board = board.sort_values(["_sort", "portions_per_100_tables", "target_revenue", "Display"],
+                              ascending=[True, False, False, True]).drop(columns="_sort").reset_index(drop=True)
+    board["rank"] = pd.Series([None] * len(board), dtype=object)
+    rank, previous = 0, None
+    for pos, idx in enumerate(board.index[board["status"].eq("Qualified")], start=1):
+        key = (board.at[idx, "portions_per_100_tables"], board.at[idx, "target_revenue"])
+        if key != previous:
+            rank = pos
+        board.at[idx, "rank"] = rank
+        previous = key
+    board["points"] = [RANK_POINTS.get(int(r), DEFAULT_RANK_POINTS) if r is not None else 0 for r in board["rank"]]
+    board["provisional"] = bool(accounts["issues"].ne("").any())
     return board
 
 
-def _status_label(eligible_tables: int) -> str:
-    if eligible_tables == 0:
-        return "No recorded shift"
-    if eligible_tables < MIN_TABLES_WEEKLY:
-        return "Building sample"
-    return "Qualified"
-
-
-def _points_for_row(row) -> int:
-    if row["status"] == "Not competing":
-        return 0  # observers never earn prize points
-    if row["status"] == "No recorded shift":
-        return 0  # absence = 0, per campaign rules
-    if row["status"] == "Building sample":
-        return UNQUALIFIED_POINTS
-    return RANK_POINTS.get(int(row["rank"]), DEFAULT_RANK_POINTS)
-
-
-def overall_leaderboard(sales: pd.DataFrame) -> pd.DataFrame:
-    """Combine all weekly boards into the £50 overall standings.
-
-    Score = total(points) across ALL 5 weeks, divided by 5 (the full campaign).
-    Weeks with no recorded shift OR below the table threshold count as 0 points
-    — absence is not N/A. There is no minimum-weeks gate: whoever posts the
-    highest average across the 5 weeks wins the £50.
-    """
-    rows: list[dict] = []
-    for w in WEEKS:
-        board = weekly_leaderboard(sales, w)
-        for _, r in board.iterrows():
-            rows.append({
-                "week": w.number,
-                "Display": r["Display"],
-                "status": r["status"],
-                "points": r["points"],
-                "conversion_pct": r["conversion_pct"],
-            })
-    long = pd.DataFrame(rows)
-
-    # Ensure every roster member (including observers) has a row for every
-    # week so the overall board is complete. Absent competitor weeks = 0
-    # points; absent observer weeks stay "Not competing".
-    all_displays = sorted(set(ELIGIBLE_ROSTER.values()))
-    seen = set(zip(long.get("Display", []), long.get("week", []))) if not long.empty else set()
-    extra = []
-    for disp in all_displays:
-        is_comp = disp in COMPETITORS
-        for w in WEEKS:
-            if (disp, w.number) not in seen:
-                extra.append({
-                    "week": w.number, "Display": disp,
-                    "status": "No recorded shift" if is_comp else "Not competing",
-                    "points": 0, "conversion_pct": 0,
-                })
-    if extra:
-        long = pd.concat([long, pd.DataFrame(extra)], ignore_index=True) if not long.empty else pd.DataFrame(extra)
-
+def overall_leaderboard(result, roster=None, competitors=None):
+    boards = [weekly_leaderboard(result, w, roster, competitors).assign(week=w.number) for w in WEEKS]
+    long = pd.concat(boards, ignore_index=True)
     if long.empty:
         return long
-
-    total_weeks = len(WEEKS)
-    agg = (
-        long.groupby(["Display"], as_index=False)
-        .agg(qualified_weeks=("status", lambda s: (s == "Qualified").sum()),
-             weeks_worked=("status", lambda s: (~s.isin(["No recorded shift", "Not competing"])).sum()),
-             total_points=("points", "sum"),
-             avg_conversion_pct=("conversion_pct", "mean"))
-    )
-    agg["is_competitor"] = agg["Display"].isin(COMPETITORS)
-    # Average is total points divided by the full 5-week campaign, not just
-    # weeks worked. Absence = 0, exactly as the rules now state.
-    agg["avg_points"] = agg["total_points"] / total_weeks
-    # Observers show no prize score — blank it out to avoid confusion.
-    agg.loc[~agg["is_competitor"], "avg_points"] = 0.0
-
-    # Only competitors are prize-eligible; observers are shown for visibility.
-    agg["prize_eligible"] = agg["is_competitor"]
-    agg = agg.sort_values(
-        ["is_competitor", "total_points", "avg_conversion_pct"],
-        ascending=[False, False, False],
-    ).reset_index(drop=True)
-    return agg
-
-
-def diagnostics(df: pd.DataFrame) -> dict:
-    """Surface data quality issues the supervisor should know about."""
-    unmapped = sorted(
-        set(df.loc[df["Type"].isin(VALID_SALE_TYPES), "Employee"]) - set(ELIGIBLE_ROSTER)
-    )
-    return {
-        "rows_total": len(df),
-        "date_min": df["Date"].min(),
-        "date_max": df["Date"].max(),
-        "sale_rows": int((df["Type"].isin(VALID_SALE_TYPES)).sum()),
-        "unmapped_employees": unmapped,
-    }
+    return (long.groupby(["Display", "is_competitor"], as_index=False)
+            .agg(total_points=("points", "sum"),
+                 weeks_worked=("eligible_tables", lambda x: int((x > 0).sum())))
+            .sort_values(["is_competitor", "total_points", "Display"], ascending=[False, False, True]))
