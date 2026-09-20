@@ -262,3 +262,10 @@ UNQUALIFIED_POINTS: int = 0    # worked but below MIN_TABLES_WEEKLY
 # Prize values.
 PRIZE_WEEKLY_GBP: int = 10
 PRIZE_OVERALL_GBP: int = 50
+
+# Historical fields remain for compatibility with imports. The scoring engine
+# uses effective-dated menus, never these undated future-week reference lists.
+from dataclasses import replace as _replace
+from .menus import NIBBLES, STARTERS
+WEEKS = tuple(_replace(w, items=NIBBLES if w.number == 1 else
+                       STARTERS if w.number == 2 else ()) for w in WEEKS)

@@ -1,160 +1,166 @@
-# George & Dragon — Upsell Incentive Scoreboard
+# George & Dragon Upsell Scoreboard
 
-A live, Zonal-driven Streamlit dashboard powering a five-week floor-team upselling
-incentive at [The George & Dragon, Marlow](https://www.heartwoodcollection.co.uk/pubs/george-and-dragon-marlow/) —
-part of the Heartwood Collection.
+A Streamlit scoreboard for a five-week hospitality incentive. Public source code;
+private transaction snapshots and staff configuration.
 
-The goal of the incentive: **increase spend per head without turning service into a hard sell**.
-The dashboard's job: **decide the £10 weekly and £50 overall winners fairly, using only
-the data Zonal already produces, and defensibly enough that nobody can dispute the result.**
+## Scoring
 
-> The repository is public. The dataset is not. Only the code, methodology, and
-> synthetic-shaped documentation are shared here.
+The weekly metric is:
 
----
-
-## The problem
-
-Running a "who sold the most?" competition in a restaurant is trivially unfair. Servers work
-different contracted hours, hold different sections, and cover different services. A raw
-sales-volume leaderboard rewards whoever was rostered most, not whoever recommended best.
-
-The pre-promo baseline dataset made this obvious. Across a five-week window, the largest-hours
-server on the team recorded roughly **4× more sales** than the smallest-hours server — not
-because of skill, but purely because of floor exposure. Any incentive the top-of-rota staff could
-win off that head-start would immediately lose trust with the rest of the team.
-
-## The solution
-
-Three design principles, in priority order:
-
-1. **Normalise by opportunity, not activity.** Rank by conversion rate at the *table* level,
-   not raw units, not per-hour, not per-cover.
-2. **Small samples are quarantined, not scored.** A server with 3 tables isn't allowed to
-   win off a lucky order.
-3. **Absence is `N/A`, not zero.** A holiday week is excluded from the average, not counted
-   as bottom rank.
-
-### Scoring maths
-
-For each week and each server:
-
-```
-opportunities  = distinct (Order No, Employee) pairs in the week's date range
-                 with Covers > 0 and Type = 'Sale'
-hits           = distinct (Order No, Employee) pairs where at least one line
-                 is in that week's target-item list
-conversion (%) = 100 × hits / opportunities
+```text
+valid qualifying portions / assigned eligible table accounts × 100
 ```
 
-A table with three qualifying items counts as **one** hit — the metric measures whether the
-server *created the opportunity*, not how many items were ordered off it.
+This is **portions per 100 tables**, not conversion percentage. Three qualifying
+portions on one account earn three credits. Scores above 100 are legitimate.
 
-Weekly points are awarded to *qualified* servers only (≥ 20 eligible tables that week):
+- Account ID separates sittings at the same physical table.
+- Main-course portions identify the ordinary account owner. Aliases resolve to one
+  employee. Chateaubriand has ownership weight two.
+- Target portions go to their sale-entry employee, regardless of account ownership.
+- Manager-owned accounts do not enter competitors' denominators. Competitor sales
+  on those accounts retain their portion credit.
+- Zero-target accounts still enter the assigned owner's denominator.
+- Zero assigned accounts means an unavailable rate, not infinity or an invented zero.
+- The existing 15-account minimum is retained. Qualified weekly ranks earn
+  80/70/60/50/40/30/20/10 points; qualified lower ranks earn 10. Other weeks earn zero.
+- Observers never earn prize points. Overall standings sum all five weeks.
+- Target revenue breaks rate ties. Exact ties share a rank and need prize review.
 
-| Rank | Points |
-|------|-------:|
-| 1    | 80     |
-| 2    | 70     |
-| ...  | ...    |
-| 8    | 10     |
-| Qualified below 8th | 10 |
-| Building sample     | 0  |
-| No recorded shift   | 0  |
+The rate measures sales contribution relative to assigned workload. Cross-table
+selling and large groups can increase a numerator without increasing its denominator.
+It is deliberately not a covers-adjusted or own-table conversion measure.
 
-The overall £50 winner is decided on **mean points across the full 5-week campaign**.
-Missed weeks and below-threshold weeks count as **0 points** (not N/A) — whatever you
-worked, you worked. There is **no minimum-weeks gate**: whoever posts the highest
-average across the campaign wins.
+## Review, not guesswork
 
-## Data model
+Payments from any employee are matched by Account ID. Payment activity is evidence,
+not proof of final bill settlement. Deposit-only accounts require confirmation.
 
-Input is Zonal's **Detailed Transaction Report** CSV (~59k rows over 5 weeks in the baseline
-sample). The processing pipeline is deliberately minimal:
+SF-tagged staff food is excluded. Main-course ties, unknown ownership, inconsistent
+covers, explicit preorders and relevant corrections are visible in the private admin
+review queue. Large party size alone does not exclude an ordinary account.
 
-1. **Parse** — enforce required columns, coerce types (dates as `dayfirst`, sales as float,
-   quantities as int).
-2. **Filter** — keep `Type == 'Sale'`, positive `Quantity`, and only employees in the
-   eligible-roster mapping. Everything else (voids, waste, payments, merges, non-competitors)
-   is stripped.
-3. **Build table view** — one row per `(Order No, Employee)`, taking `max(Covers)` because
-   Zonal repeats the cover count on every line of the order.
-4. **Weekly aggregate** — for the active week's date window, compute opportunities, hits,
-   conversion %, target revenue, and target units per server; assign status; rank the
-   qualified subset; award points.
-5. **Overall aggregate** — average points across qualified weeks, gate on
-   `qualified_weeks >= MIN_QUALIFIED_WEEKS`.
+Relevant voids/corrections and transfers are **held**, not blindly subtracted or
+double-counted. The supervisor supplies verified final sales for the affected
+account, preserving the original sale-entry employee. Other valid accounts continue
+to score. Unresolved ownership keeps item credits but holds that denominator, so
+rankings remain explicitly provisional until reviewed.
 
-All logic lives in `src/processing.py` (~250 lines, zero magic). All tunables live in
-`src/config.py`.
+Reviews require an evidence note and are bound to the full account fingerprint.
+A changed account expires its previous review. Private snapshot history records
+review changes. Final prize decisions must wait for relevant review resolution.
 
-## Design decisions
+## Dated menus
 
-Choices I made — and why — that you can push back on:
+`src/menus.py` contains the confirmed outgoing main and target mappings through
+23 September 2026. The 13 confirmed starter names replace the old inaccurate list.
 
-| Decision | Chose | Rejected alternative | Why |
-|---|---|---|---|
-| Denominator | Eligible tables served | Covers, hours, shifts | Servers control tables, not who sits at them. Per-cover penalises servers assigned bigger groups; per-hour requires a manual timesheet. Tables are what Zonal actually attributes. |
-| Hit counting | Distinct tables with ≥1 target item | Total target units sold | Multi-item tables shouldn't 4× a lucky order. Measures *did you make the sell happen*, not *how big was that guest's appetite*. |
-| Small-sample rule | Hard 15-table minimum for weekly prize | Rolling z-score or Bayesian shrinkage | Legibility. The team needs to understand the rule at pre-shift. "15 tables" beats "posterior distribution". |
-| Absence handling | Missed week = 0 points in the average | Exclude the week (treat as N/A) | Simpler to explain, harder to game. Whatever you worked, you worked — no adjustments. |
-| Prize cadence | £10 weekly + £50 overall | Single £50 at the end | Weekly urgency drives daily behaviour. Overall prize rewards habit-building across all 5 themes. |
-| Overall metric | Mean points across full 5-week campaign | Sum of points; min-weeks gate | Mean stays comparable regardless of hours worked; no gate keeps it inclusive for shorter-week staff. |
-| Cheese Selection | Present in both Week 1 and Week 4 taxonomy | Restrict to one theme | Different selling moments (shared board vs. dessert alternative). Each active week's leaderboard is independent, so no sale is double-counted inside a single competition. |
+No menu is assumed from 24 September onward; later-week targets are unconfirmed.
+Admin can add exact product mappings and non-overlapping effective dates without
+editing code. Scoring and ownership use the sale date, preserving historical rules.
+Unknown products are catalogued privately for review; drinks/modifiers will also
+appear, so absence from the mapping does not automatically mean an error.
 
-## Repository layout
+Menu changes currently have **whole-day resolution**. A mid-day transition or
+concurrent menus needs a further explicit rule rather than guessing.
 
-```
-gd-scoreboard/
-├── app.py                 # Streamlit UI (tabs, KPIs, styled leaderboard)
-├── src/
-│   ├── config.py          # Roster, weekly themes, thresholds, prize values
-│   └── processing.py      # Parse → clean → table view → weekly → overall
-├── tests/
-│   └── smoke.py           # Sanity check against a real CSV (excluded from repo)
-├── requirements.txt
-├── .streamlit/config.toml # Dark theme
-└── README.md
-```
+## Upload safety and storage
 
-## Running locally
+Upload one **complete cumulative** Zonal export beginning 14 September, replacing
+the prior snapshot. Daily incremental uploads are not supported.
 
-```bash
-git clone https://github.com/Lloydster118/gd-scoreboard.git
-cd gd-scoreboard
-pip install -r requirements.txt
-streamlit run app.py
-```
+- Genuine identical rows are preserved.
+- Identical cumulative reuploads are idempotent.
+- Missing columns, bad dates/numbers, missing Account IDs and future dates are rejected.
+- An earlier end date, missing previous accounts or reduced daily row counts require
+  explicit confirmation of a corrected replacement.
+- The uploader must attest the file is complete. Counts cannot prove completeness.
+- Validation occurs before saving. Failed validation or failed storage leaves the
+  last good snapshot intact.
+- Stored CSV contains only scoring fields. Customer names, free-form details and
+  unused payment/customer fields are discarded.
 
-Then upload a Zonal Detailed Transaction Report CSV via the sidebar. The app processes
-the file in-memory and renders the leaderboard — nothing is persisted server-side, so
-this is safe to run on Streamlit Community Cloud with public URL access.
+Production storage is a **separate private GitHub repository**, holding one compressed
+snapshot (`state.json.gz`) with CSV, dated menus, reviews and upload metadata.
+Git history supplies recovery versions. SHA-based writes reject concurrent updates.
+The backend refuses a public data repository. GitHub authentication errors and
+corrupt snapshots are shown as unavailable data, not an empty successful scoreboard.
+
+This is low-volume operational storage, not a high-write transactional database.
+Anyone with private-repository access can read its snapshot history. Restrict access
+and set an appropriate retention/deletion policy before keeping data indefinitely.
 
 ## Deployment
 
-Hosted on [Streamlit Community Cloud](https://streamlit.io/cloud), which reads directly
-from this GitHub repo. To deploy:
+Keep the existing Streamlit app connected to `main` / `app.py`.
 
-1. Fork/clone this repo.
-2. Sign into Streamlit Cloud with GitHub.
-3. Point a new app at `app.py` on the `main` branch.
-4. No secrets, no environment variables — all data enters via the uploader.
+1. Create a separate **private** repository for data.
+2. Create a fine-grained GitHub token restricted to that repository, with
+   **Contents: read and write** and the automatically required Metadata access.
+   Set a suitable expiry and rotate before expiry.
+3. Add the following directly in **Streamlit Cloud Secrets**. Never paste a token
+   into chat, public source, a commit, a screenshot or a log.
 
-## What's *not* in this repo
+```toml
+admin_pin = "REPLACE_WITH_A_STRONG_PRIVATE_VALUE"
 
-- Any Zonal export, real staff sales, or menu-item revenue data.
-- Real employee names beyond the author's own.
-- The actual pub's operational config beyond what's needed to explain the design.
+[storage]
+repo = "Lloydster118/gd-scoreboard-data"
+token = "REPLACE_DIRECTLY_IN_STREAMLIT_SECRETS"
 
-Anyone can clone the repo, spin up the app, and see exactly how the incentive is calculated —
-they just need their own CSV to see any numbers.
+# Keep the existing private roster configuration as well:
+[[roster]]
+display = "Server 1"
+aliases = ["Server One"]
+competitor = true
+```
+
+Keep `admin_pin` as a top-level key before TOML table declarations.
+Do not replace the real roster with the example. Existing flat `[roster]` mappings
+are also supported, but array-of-tables supports manager observers and aliases.
+
+4. Confirm Admin reports the private roster, and upload the current cumulative file.
+5. Review flagged accounts; add the new seasonal menu when confirmed.
+6. Restart the app and confirm upload timestamp, coverage and scores persist.
+
+Admin fails closed when no PIN exists; there is no hard-coded default. The PIN
+gate is not multi-user SSO. Session-level attempt throttling is basic protection,
+not a substitute for a strong secret or network-wide authentication controls.
+
+Without storage configuration, the app can preview a surviving legacy local CSV,
+but new uploads are disabled. Legacy server files may be lost on a redeploy.
+**Back up/re-export the current cumulative data before promoting this release.**
+
+## Development and tests
+
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -v
+streamlit run app.py
+```
+
+For local development only:
+
+```toml
+admin_pin = "LOCAL_TEST_ONLY"
+[storage]
+development_local = true
+```
+
+Local snapshots are atomic but not durable on Streamlit Cloud. Production should
+use the private backend. `.streamlit/secrets.toml`, transaction data and real roster
+files are git-ignored. Tests and CI use synthetic records only.
+
+## Layout
+
+- `src/processing.py`: strict CSV parsing, account evidence, scoring and ranks.
+- `src/menus.py`: effective-dated exact product taxonomy.
+- `src/storage.py`: versioned private snapshots and replacement validation.
+- `src/config.py`: private roster loading, weekly schedule and prize settings.
+- `app.py`: public standings and PIN-gated review/configuration/upload controls.
+- `tests/`: portable synthetic regression and Streamlit integration tests.
 
 ## Author
 
-Harry Lloyd — Front-of-House Supervisor at The George & Dragon and a BNU BSc (Hons)
-Computer Science with AI graduate targeting data-science and AI-engineering roles.
-This project is one of several portfolio pieces that turn a real operational problem
-into a small, defensible data product.
-
-- LinkedIn / portfolio: (add your links)
-- Contact: via GitHub `@Lloydster118`
+Harry Lloyd, Front-of-House Supervisor and BNU Computer Science with AI graduate.
+This project turns an operational problem into a documented, testable data product.
