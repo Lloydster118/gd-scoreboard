@@ -1,4 +1,4 @@
-# Deployment environment revision: additional-courses-v1 (2026-09-21).
-# Refresh the Streamlit process when introducing new scoring-module exports.
+# Deployment environment revision: heartwood-presentation-v1 (2026-09-21).
+# Refresh the Streamlit process when introducing new presentation-module exports.
 streamlit>=1.36,<2
 pandas>=2.2,<3
