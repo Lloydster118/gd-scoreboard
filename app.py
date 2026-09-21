@@ -209,6 +209,12 @@ with tabs[2]:
     st.markdown(f"""
 - **Weekly score:** Valid qualifying portions ÷ eligible table accounts assigned to you × 100.
 - **Every portion counts:** Three of the same qualifying item earn three portion credits. There is no per-account cap.
+- **Additional courses:** Starters count alongside a recognised main-course meal. Desserts count alongside a main,
+  whether they are the second course or the third after a starter. Standalone starters/desserts do not qualify.
+- **Package guests count too:** Qualifying courses actually ordered count, including zero-priced or included
+  resident-package courses. A package charge or allowance alone earns no portion credit.
+- **Reward the outcome:** Orders count whether the guest was prompted or already intended to order them.
+  There is no persuasion test or team-average adjustment to prize scores.
 - **Credit follows the sale entry:** You retain credit for qualifying portions you enter on someone else's account.
 - **Main-course owner:** Ordinary ownership follows the greatest number of main-course portions entered.
   Chateaubriand counts as two main portions for ownership, not double upsell credit.
@@ -217,7 +223,9 @@ with tabs[2]:
   The same person acting as owner and seller receives only one share. Portions stay entirely with their seller.
 - **Managers:** Keep their share and their item credit but cannot win prizes. Their share is not redistributed.
 - **Zero-target accounts:** Still contribute one opportunity to the main-course owner.
-- **Unresolved/no-main accounts:** Item credit can remain visible, but no opportunity is invented; results stay provisional.
+- **Unresolved/no-main accounts:** No opportunity is invented. Valid nibble credit can remain without a main;
+  starter/dessert credit requires recognised main-course evidence on the same account.
+  Unresolved accounts keep results provisional; reviewed non-dining accounts do not.
 - **Zero assigned tables:** The rate is unavailable, not zero or infinity; no weekly rank.
 - **Eligibility:** At least {MIN_TABLES_WEEKLY} shared table opportunities in the relevant scoring window.
   Below it, results are visible but earn no ranking points.
@@ -252,6 +260,15 @@ Relevant voids, corrections and transfers require a reviewed final sales list, r
 blind subtraction. Package charges and modifiers do not become extra mains.
 Confirmed preorders need an owner review; later-week preselected-course eligibility needs explicit confirmation.
 Large walk-ins are not excluded merely because they have 12 or more guests.
+
+### Building the additional-course habit
+Starter portions qualify with a recognised main-course meal on the same account.
+Dessert portions qualify with a main, with or without a starter: both two-course and three-course meals count.
+This is account-level evidence, not a claim that each individual diner ordered both courses.
+An actually ordered qualifying package course counts even when its item price is zero.
+Package allowances alone, standalone starters/desserts and staff food do not earn this credit.
+Nibbles keep their existing separate rules. Whether the guest needed persuading is not measured.
+Split bills or transferred courses without main-course evidence on the same account need review rather than guessing.
 
 ### Cumulative uploads
 Upload the complete export from 14 September through the latest completed reporting period.

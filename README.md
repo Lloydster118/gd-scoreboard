@@ -21,6 +21,16 @@ valid qualifying portions / shared eligible table opportunities × 100
 This is **portions per 100 tables**, not conversion percentage. Three qualifying
 portions on one account earn three credits. Scores above 100 are legitimate.
 
+- Starters (category 2) and desserts (category 4) require a positive recognised
+  main-course portion on the same account's final sales. An owner override or
+  package charge alone is not main evidence. Desserts qualify as a second or third
+  course; no starter is required. The rule also applies to ongoing category scores.
+- Actual qualifying package courses count, including zero-priced portions.
+  Package allowances without item sales earn nothing. Guest persuasion is not
+  inferred, and the team average does not adjust prize scores.
+- Nibbles retain their separate credit rules, including valid standalone sales.
+  Existing payment, correction, staff-food and preorder review safeguards remain.
+  Split accounts lacking main evidence require reconciliation, not an assumed link.
 - Account ID separates sittings at the same physical table.
 - Main-course portions identify the ordinary account owner. Aliases resolve to one
   employee. Chateaubriand has ownership weight two.

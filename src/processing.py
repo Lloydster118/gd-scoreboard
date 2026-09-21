@@ -201,7 +201,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
                 unknown.append(dict(Date=row["Date"], Description=row["Description"], reason="No confirmed menu"))
                 continue
             weight = menu["mains"].get(row["Description"], 0)
-            if weight:
+            if weight and row["Quantity"] > 0:
                 person = roster.get(row["Employee"], EXCLUDED_OWNER + ": " + row["Employee"])
                 owner_weights[person] = owner_weights.get(person, 0) + row["Quantity"] * weight
             elif row["Description"] not in set(sum(menu["targets"].values(), [])):
@@ -263,7 +263,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             else:
                 issues = [x for x in issues if x not in (
                     "No recognised main-course ownership", "Owner unresolved; denominator held")]
-                data_notes.append("Reviewed non-main account: no opportunity; qualifying item credit retained")
+                data_notes.append("Reviewed non-main account: no opportunity; item credit subject to category rules")
         # Missing owners must not silently improve another person's rate:
         # affected weeks are explicitly provisional until reviewed.
         issues.extend(blockers)
@@ -277,6 +277,12 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
                     continue
                 if str(week.number) not in menu["targets"]:
                     issues.append(f"Week {week.number} targets not confirmed")
+                    continue
+                # Starters and desserts reward an additional course with a
+                # recognised main, not standalone snacks/sweets. Owner overrides
+                # and package charges alone are not main-course evidence.
+                # Zero-priced included courses are eligible actual portions.
+                if week.number in (2, 4) and not owner_weights:
                     continue
                 if preorder and week.number > 1 and not review.get("preorder_targets_confirmed"):
                     issues.append("Preselected courses: target eligibility needs review")

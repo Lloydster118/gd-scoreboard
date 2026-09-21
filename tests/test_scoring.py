@@ -313,6 +313,72 @@ class ScoringTests(unittest.TestCase):
             r = score([row(day=day), row(day=day, item="Cheese Souffle", qty=2), paid(day=day)])
             self.assertEqual(board(r, WEEKS[1]).loc["Alpha", "target_units"], expected)
 
+    def test_additional_courses_require_main_not_package_or_owner_override(self):
+        for number, day, target in [(2, "21/09/2026", "Test Starter"),
+                                     (4, "05/10/2026", "Test Dessert")]:
+            menus = [{"name": "Synthetic course test", "start": "2026-09-14", "end": "2026-10-18",
+                      "mains": {"Burger & Fries": 1},
+                      "targets": {str(n): [] for n in range(1, 6)}}]
+            menus[0]["targets"][str(number)] = [target]
+            for extras in [[], [row(day=day, item="Resident Package")],
+                           [row(day=day, item="Test Starter")]]:
+                with self.subTest(category=number, extras=len(extras)):
+                    rows = [row(day=day, item=target), *extras, paid(day=day)]
+                    reviews = {"0001": {"fingerprint": fingerprint(frame(rows)),
+                                         "note": "Owner confirmed, no main evidence", "owner": "Alpha"}}
+                    r = score(rows, menus=menus, reviews=reviews)
+                    self.assertTrue(r.credits.empty)
+                    self.assertTrue(r.categories[number].credits.empty)
+
+    def test_package_courses_count_at_zero_price_with_main_and_shared_seller(self):
+        for number, day, target in [(2, "21/09/2026", "Test Starter"),
+                                     (4, "05/10/2026", "Test Dessert")]:
+            menus = [{"name": "Synthetic course test", "start": "2026-09-14", "end": "2026-10-18",
+                      "mains": {"Burger & Fries": 1},
+                      "targets": {str(n): [] for n in range(1, 6)}}]
+            menus[0]["targets"][str(number)] = [target]
+            for starter in (False, True):
+                rows = [row(day=day, amount=0), row(day=day, item=target, employee="B", qty=2, amount=0),
+                        row(day=day, item="Resident Package"), paid(day=day)]
+                if starter:
+                    rows.append(row(day=day, item="Other Starter", amount=0))
+                with self.subTest(category=number, starter=starter):
+                    r = score(rows, menus=menus)
+                    for result in (r, r.categories[number]):
+                        b = board(result, WEEKS[number - 1])
+                        self.assertEqual(b.loc["Beta", "target_units"], 2)
+                        self.assertEqual(b.loc["Beta", "eligible_tables"], .5)
+                        self.assertEqual(b.loc["Alpha", "eligible_tables"], .5)
+                        self.assertEqual(b.loc["Beta", "target_revenue"], 0)
+
+    def test_reviewed_removed_main_cannot_enable_starter_credit(self):
+        rows = [row(day="21/09/2026"), row(day="21/09/2026", item="Cheese Souffle"), paid(day="21/09/2026")]
+        sales = frame(rows).query("Type == 'Sale'")[["Date", "Employee", "Description", "Quantity", "Sales Amount"]]
+        sales["Date"] = sales["Date"].astype(str)
+        sales.loc[sales.Description.eq("Burger & Fries"), "Quantity"] = 0
+        reviews = {"0001": {"fingerprint": fingerprint(frame(rows)), "note": "Main cancelled",
+                             "final_sales": sales.to_dict("records"), "no_main_confirmed": True}}
+        r = score(rows, reviews=reviews)
+        self.assertTrue(r.credits.empty)
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+
+    def test_rolling_starters_still_require_main_after_launch_week(self):
+        menus = copy.deepcopy(DEFAULT_MENUS)
+        menus[0]["end"] = "2026-10-18"
+        menus[0]["targets"].update({"3": [], "4": [], "5": []})
+        for with_main in (False, True):
+            rows = [row(day="05/10/2026", item="Cheese Souffle"), paid(day="05/10/2026")]
+            if with_main:
+                rows.append(row(day="05/10/2026"))
+            r = score(rows, menus=menus)
+            self.assertEqual(r.categories[2].credits.target_units.sum(), int(with_main))
+
+    def test_package_allowance_without_actual_course_earns_no_credit(self):
+        r = score([row(day="21/09/2026"), row(day="21/09/2026", item="Resident Package"),
+                   paid(day="21/09/2026")])
+        self.assertTrue(r.credits.empty)
+        self.assertTrue(r.accounts.iloc[0]["counted"])
+
     def test_new_menu_does_not_rewrite_old_days(self):
         menus = copy.deepcopy(DEFAULT_MENUS)
         menus.append({"name": "Test seasonal", "start": "2026-09-24", "end": "2026-09-27",
