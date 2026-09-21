@@ -160,7 +160,8 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         if review.get("exclude", False):
             accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
                                  covers=covers, owner=None, counted=False, credit_allowed=False,
-                                 issues="Excluded by review", fingerprint=fp, data_notes=""))
+                                 issues="", fingerprint=fp, data_notes="Excluded by review",
+                                 owner_identity=None))
             continue
         settled = (account["Type"].eq("Payment") & account["Payment Amount"].gt(0)).any()
         deposit = (account["Type"].eq("Ledger") & account["Description"].eq("Deposit Red")
@@ -256,6 +257,13 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             owner = EXCLUDED_OWNER
         if owner is None:
             issues.append("Owner unresolved; denominator held")
+        if review.get("no_main_confirmed"):
+            if owner_weights or override or preorder:
+                blockers.append("No-main review conflicts with recognised main ownership; review again")
+            else:
+                issues = [x for x in issues if x not in (
+                    "No recognised main-course ownership", "Owner unresolved; denominator held")]
+                data_notes.append("Reviewed non-main account: no opportunity; qualifying item credit retained")
         # Missing owners must not silently improve another person's rate:
         # affected weeks are explicitly provisional until reviewed.
         issues.extend(blockers)

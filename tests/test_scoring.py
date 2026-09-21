@@ -135,6 +135,33 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(r.accounts.iloc[0]["counted"])
         self.assertTrue(r.credits.empty)
 
+    def test_reviewed_non_main_retains_credit_without_opportunity(self):
+        rows = [row(item="Scotch Egg"), paid()]
+        reviews = {"0001": {"fingerprint": fingerprint(frame(rows)), "note": "Standalone snack visit",
+                             "no_main_confirmed": True}}
+        r = score(rows, reviews=reviews)
+        self.assertEqual(r.credits.target_units.sum(), 1)
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+        self.assertEqual(r.accounts.iloc[0]["issues"], "")
+        self.assertFalse(board(r)["provisional"].any())
+        # A financial blocker must not be hidden by the dining classification.
+        unpaid = [row(item="Scotch Egg")]
+        reviews["0001"]["fingerprint"] = fingerprint(frame(unpaid))
+        r = score(unpaid, reviews=reviews)
+        self.assertIn("No positive payment", r.accounts.iloc[0]["issues"])
+        self.assertTrue(r.credits.empty)
+
+    def test_non_main_review_conflict_and_expiry_fail_closed(self):
+        rows = [row(), paid()]
+        reviews = {"0001": {"fingerprint": fingerprint(frame(rows)), "note": "Incorrect classification",
+                             "no_main_confirmed": True}}
+        r = score(rows, reviews=reviews)
+        self.assertIn("conflicts", r.accounts.iloc[0]["issues"])
+        self.assertFalse(r.accounts.iloc[0]["counted"])
+        reviews["0001"]["fingerprint"] = "stale"
+        r = score(rows, reviews=reviews)
+        self.assertIn("Review expired", r.accounts.iloc[0]["issues"])
+
     def test_deposit_requires_review_then_counts(self):
         rows = [row(), row(kind="Ledger", item="Deposit Red", qty=0, amount=0, payment=30)]
         r = score(rows)
@@ -275,6 +302,9 @@ class ScoringTests(unittest.TestCase):
         r = score(rows, reviews=reviews)
         self.assertFalse(r.accounts.iloc[0]["counted"])
         self.assertTrue(r.credits.empty)
+        self.assertEqual(r.accounts.iloc[0]["issues"], "")
+        self.assertEqual(r.accounts.iloc[0]["data_notes"], "Excluded by review")
+        self.assertFalse(board(r)["provisional"].any())
 
     def test_starters_and_menu_boundary(self):
         self.assertEqual(len(STARTERS), 13)
