@@ -359,12 +359,19 @@ with tabs[4]:
                     st.dataframe(account, hide_index=True, use_container_width=True)
                     previous = state["reviews"].get(str(account_id), {})
                     owner_options = ["Use automatic ownership", EXCLUDED_OWNER] + sorted(set(ELIGIBLE_ROSTER.values()))
-                    selected_owner = st.selectbox("Confirmed owner", owner_options, key=f"owner_{account_id}")
-                    settled = st.checkbox("I verified settlement despite missing ordinary payment evidence", key=f"settled_{account_id}")
+                    selected_owner = st.selectbox("Confirmed owner", owner_options,
+                                                  index=owner_options.index(previous.get("owner", "Use automatic ownership")),
+                                                  key=f"owner_{account_id}")
+                    settled = st.checkbox("I verified settlement despite missing ordinary payment evidence",
+                                          value=bool(previous.get("settlement_confirmed")), key=f"settled_{account_id}")
                     preorder = st.checkbox("This is a confirmed preorder", value=bool(previous.get("preorder")), key=f"pre_{account_id}")
-                    targets_ok = st.checkbox("For later weeks, I verified which preorder items were genuine extra upsells", key=f"target_{account_id}")
-                    excluded = st.checkbox("Exclude this account entirely, including all item credit", key=f"exclude_{account_id}")
-                    note = st.text_input("Review evidence / reason (required)", key=f"note_{account_id}")
+                    targets_ok = st.checkbox("For later weeks, I verified which preorder items were genuine extra upsells",
+                                             value=bool(previous.get("preorder_targets_confirmed")), key=f"target_{account_id}")
+                    excluded = st.checkbox("Exclude this account entirely, including all item credit",
+                                           value=bool(previous.get("exclude")), key=f"exclude_{account_id}")
+                    no_main = st.checkbox("Confirmed non-main account: retain valid item credit, assign no table opportunity",
+                                          value=bool(previous.get("no_main_confirmed")), key=f"no_main_{account_id}")
+                    note = st.text_input("Review evidence / reason (required)", value=previous.get("note", ""), key=f"note_{account_id}")
                     final_text = st.text_area(
                         "Verified final sales JSON (optional; required for relevant corrections/transfers)",
                         value=json.dumps(previous.get("final_sales"), indent=2) if previous.get("final_sales") is not None else "",
@@ -377,7 +384,7 @@ with tabs[4]:
                                 raise ValueError("Add an evidence note before saving the review.")
                             review = dict(fingerprint=details["fingerprint"], note=note.strip(),
                                           settlement_confirmed=settled, preorder=preorder,
-                                          preorder_targets_confirmed=targets_ok, exclude=excluded,
+                                          preorder_targets_confirmed=targets_ok, exclude=excluded, no_main_confirmed=no_main,
                                           reviewed_at=dt.datetime.now(dt.timezone.utc).isoformat())
                             if selected_owner != "Use automatic ownership":
                                 review["owner"] = selected_owner

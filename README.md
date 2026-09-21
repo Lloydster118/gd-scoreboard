@@ -212,3 +212,13 @@ files are git-ignored. Tests and CI use synthetic records only.
 
 Harry Lloyd, Front-of-House Supervisor and BNU Computer Science with AI graduate.
 This project turns an operational problem into a documented, testable data product.
+# Reviewed account dispositions
+
+An explicit, fingerprint-valid full exclusion is resolved, not an outstanding
+flag. Its reason remains in the private review and the account data notes.
+The `no_main_confirmed` review option closes a verified non-main ownership
+question without inventing a table opportunity or deleting otherwise valid
+item credit. It does not waive payment, refund, correction, menu, or transfer
+checks. A conflicting main-course mapping or a changed account requires review
+again. These are evidence-backed account decisions, not automatic classification
+of every unknown product.
