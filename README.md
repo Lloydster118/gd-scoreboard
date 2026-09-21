@@ -232,3 +232,21 @@ item credit. It does not waive payment, refund, correction, menu, or transfer
 checks. A conflicting main-course mapping or a changed account requires review
 again. These are evidence-backed account decisions, not automatic classification
 of every unknown product.
+
+## Visual presentation
+
+The interface takes its palette direction from [Heartwood Inns](https://heartwoodinns.com/):
+warm cream, peach, olive and dark green. The supplied George & Dragon artwork
+is used for the masthead and favicon. Fraunces and Work Sans provide open-font
+alternatives rather than copying the corporate site's proprietary typeface.
+Google Fonts is optional: system serif and sans-serif fallbacks remain usable.
+
+`src/presentation.py` and `assets/theme.css` contain presentation-only code.
+Weekly and overall cards consume the existing scoring outputs; detailed tables
+(including managers and Streamlit's built-in CSV export) remain in expanders.
+The prize-week selector defaults to the latest uploaded week. Light, dark and
+system appearance options do not change scoring, storage or review decisions.
+
+The design regression suite covers HTML escaping, fractional opportunities,
+unavailable scores, tied overall ranks and theme tokens. Responsive browser QA
+uses an isolated synthetic fixture without production credentials or staff data.

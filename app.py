@@ -27,19 +27,20 @@ from src.storage import (
     GitHubStore, LocalStore, StorageError, empty_state, replacement_state,
     weekly_result, finalise_week,
 )
+from src.presentation import (
+    stylesheet, masthead, hero, weekly_cards, overall_cards, campaign_path, empty_card,
+)
 
-st.set_page_config(page_title="G&D Upsell Scoreboard", page_icon="🍽️", layout="wide")
-st.markdown("""
-<style>
-[data-testid="stMainBlockContainer"] {padding-top:2rem;max-width:1200px}
-h1 {font-size:1.9rem!important}
-@media(max-width:600px){h1{font-size:1.5rem!important}h2{font-size:1.25rem!important}}
-.prize-hero {background:linear-gradient(135deg,#1e293b,#0f172a);padding:1.5rem;
-border-radius:12px;border:1px solid #334155;margin-bottom:1.5rem}
-.prize-hero h2 {color:#fbbf24;margin:0 0 .4rem}
-.prize-hero p {color:#cbd5e1;margin:0}
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="G&D · Team Scoreboard",
+                   page_icon=str(Path(__file__).parent / "assets" / "favicon.png"), layout="wide")
+with st.container(key="brandbar"):
+    brand, appearance = st.columns([4, 1], vertical_alignment="center")
+    with brand:
+        st.markdown(masthead(), unsafe_allow_html=True)
+    with appearance:
+        theme = st.selectbox("Appearance", ["System", "Light", "Dark"],
+                             key="appearance_mode", label_visibility="collapsed")
+st.markdown("<style>" + stylesheet(theme) + "</style>", unsafe_allow_html=True)
 
 
 def secret(name, default=None):
@@ -62,6 +63,9 @@ def show_board(board):
     if board.empty:
         st.info("No roster configured.")
         return
+    competing = board[board["status"].ne("Not competing")]
+    if not competing.empty:
+        st.markdown(weekly_cards(competing), unsafe_allow_html=True)
     view = board.rename(columns={
         "rank": "#", "Display": "Server", "eligible_tables": "Table opportunities",
         "target_units": "Portions", "portions_per_100_tables": "Portions / 100 tables",
@@ -71,12 +75,13 @@ def show_board(board):
     view["#"] = view["#"].map(lambda x: str(int(x)) if pd.notna(x) else "")
     view["Portions / 100 tables"] = view["Portions / 100 tables"].map(
         lambda x: f"{x:.1f}" if pd.notna(x) else "Unavailable")
-    st.dataframe(view[["#", "Server", "Table opportunities", "Portions", "Portions / 100 tables",
-                       "Target revenue £", "Ranking points", "Status"]].style.format({
-                           "Portions": "{:.0f}", "Target revenue £": "£{:.2f}",
-                           "Table opportunities": "{:.2f}",
-                       }, na_rep="Unavailable"),
-                 hide_index=True, use_container_width=True)
+    with st.expander("Full table, managers & CSV export"):
+        st.dataframe(view[["#", "Server", "Table opportunities", "Portions", "Portions / 100 tables",
+                           "Target revenue £", "Ranking points", "Status"]].style.format({
+                               "Portions": "{:.0f}", "Target revenue £": "£{:.2f}",
+                               "Table opportunities": "{:.2f}",
+                           }, na_rep="Unavailable"),
+                     hide_index=True, use_container_width=True)
 
 
 def save_state(new_state, message):
@@ -99,8 +104,6 @@ def save_state(new_state, message):
     st.rerun()
 
 
-st.title("George & Dragon · Upsell Scoreboard")
-st.caption("Marlow · Floor team · Five-week incentive")
 store, durable = get_store()
 state, version = empty_state(), None
 load_error = None
@@ -127,6 +130,7 @@ if not load_error:
 
 today = dt.datetime.now(ZoneInfo("Europe/London")).date()
 current = next((w for w in WEEKS if w.start <= today <= w.end), WEEKS[0] if today < WEEKS[0].start else WEEKS[-1])
+st.markdown(hero(current), unsafe_allow_html=True)
 if load_error:
     st.error(load_error)
 if not durable:
@@ -142,35 +146,52 @@ if result is not None:
     review_count = int(result.accounts["issues"].ne("").sum())
     if review_count:
         st.warning(f"Provisional: {review_count} accounts need admin review. Held or unresolved accounts can change rankings; do not award prizes yet.")
-    st.caption("Payments are evidence of activity, not a guarantee that every bill is finally settled.")
 
 tabs = st.tabs(["Leaderboard", "5-Week View", "Rules", "How It Works", "Admin"])
 with tabs[0]:
-    st.markdown(f"""<div class="prize-hero"><h2>£{PRIZE_WEEKLY_GBP} weekly · £{PRIZE_OVERALL_GBP} overall</h2>
-    <p>Qualifying portions per 100 accepted main-course accounts. Every valid portion counts.</p></div>""", unsafe_allow_html=True)
-    st.caption("One accepted Account ID contributes one table opportunity per category, shared between "
-               "the main-course owner and qualifying-item sellers (0.5 each when two people share). "
-               "Drinks/snack-only visits are not assigned by main-course ownership. "
-               "Unresolved relevant corrections remain excluded pending review.")
-    st.subheader(f"Week {current.number}: {current.name}")
-    if today < current.start:
-        st.info(f"Unlocks on {current.start:%A %d %B}.")
+    st.subheader("The weekly leaderboard")
+    available = [w for w in WEEKS if w.start <= today] or [WEEKS[0]]
+    # Show the latest week with data, rather than an unexplained zero board on Monday.
+    data_day = raw["Date"].max() if raw is not None else today
+    default_week = next((w for w in available if w.start <= data_day <= w.end), available[-1])
+    selected_number = st.selectbox("Prize week", [w.number for w in available],
+                                  index=available.index(default_week),
+                                  format_func=lambda n: f"Week {n} · {['Nibbles', 'Starters', 'Sides & upgrades', 'Desserts', 'After dinner'][n-1]} · {WEEKS[n-1].start:%d %b} to {WEEKS[n-1].end:%d %b}",
+                                  key="leaderboard_week")
+    selected = WEEKS[selected_number - 1]
+    st.caption("Ranked by qualifying portions per 100 shared table opportunities. "
+               "Minimum 15 opportunities. Portion credit stays with the seller.")
+    if today < selected.start:
+        st.info(f"Unlocks on {selected.start:%A %d %B}.")
     elif result is None or load_error:
-        st.info("The scoreboard will appear after a valid cumulative upload.")
+        st.markdown(empty_card("Ready for the first service",
+                               "The scoreboard will appear after a valid cumulative upload. "
+                               "An administrator can add the export in Admin."), unsafe_allow_html=True)
     else:
-        show_board(weekly_result(state, result, current, ELIGIBLE_ROSTER, COMPETITORS))
-        st.subheader("Overall standings")
-        st.caption("£50 habit-building competition: categories keep tracking from launch through 18 October. "
-                   "Each contributes up to 20 points: cumulative category ranking points ÷ 80 × 20. "
-                   "Five equally weighted categories, 100 points maximum. Not a sum of frozen weekly results.")
+        if state.get("weekly_results", {}).get(str(selected.number)):
+            st.success("£10 weekly result frozen. Later sales only affect the overall competition.")
+        elif today > selected.end:
+            st.caption("Sales window closed · awaiting complete data and review, not yet frozen.")
+        if not raw["Date"].between(selected.start, selected.end).any():
+            st.markdown(empty_card("A new week is ready",
+                                   "No transactions have been uploaded for this prize week yet. "
+                                   "Earlier categories continue contributing to the £50 prize."),
+                        unsafe_allow_html=True)
+        else:
+            show_board(weekly_result(state, result, selected, ELIGIBLE_ROSTER, COMPETITORS))
+        st.subheader("The bigger picture")
+        st.caption("£50 overall · Nibbles and every launched category keep tracking through 18 October. "
+                   "Five equally weighted categories contribute up to 20 points each, for a score out of 100.")
         overall = overall_leaderboard(result, ELIGIBLE_ROSTER, COMPETITORS)
         if overall["provisional"].any():
             st.warning("Overall standings remain provisional while rolling-category accounts need review.")
-        st.dataframe(overall.drop(columns=["total_points", "provisional"]).rename(columns={
-                         "Display": "Server", "overall_score": "Overall / 100",
-                         "categories_qualified": "Categories qualified", "is_competitor": "Competing",
-                         **{f"category_{w.number}": f"Category {w.number} / 20" for w in WEEKS}}),
-                     hide_index=True, use_container_width=True)
+        st.markdown(overall_cards(overall[overall["is_competitor"]]), unsafe_allow_html=True)
+        with st.expander("Overall breakdown & CSV export"):
+            st.dataframe(overall.drop(columns=["total_points", "provisional"]).rename(columns={
+                             "Display": "Server", "overall_score": "Overall / 100",
+                             "categories_qualified": "Categories qualified", "is_competitor": "Competing",
+                             **{f"category_{w.number}": f"{w.name} / 20" for w in WEEKS}}),
+                         hide_index=True, use_container_width=True)
         with st.expander("Ongoing category scores for the £50 prize"):
             for week in WEEKS:
                 if today >= week.start:
@@ -180,6 +201,10 @@ with tabs[0]:
                     show_board(category_leaderboard(result, week, ELIGIBLE_ROSTER, COMPETITORS))
 
 with tabs[1]:
+    st.subheader("Five weeks. One growing habit.")
+    st.markdown(campaign_path(WEEKS, today), unsafe_allow_html=True)
+    st.caption("Each weekly £10 result is separate. Every launched category continues counting "
+               "towards the £50 overall prize until 18 October.")
     for week in WEEKS:
         st.subheader(f"Week {week.number}: {week.name}")
         st.caption(f"{week.start:%d %b} to {week.end:%d %b}")
@@ -436,5 +461,6 @@ with tabs[4]:
                 except Exception as exc:
                     st.error(f"Menus not saved: {exc}")
 
-st.divider()
-st.caption("George & Dragon Marlow · Heartwood Collection · Zonal transaction evidence · Questions to Harry")
+st.markdown('<footer class="gd-footer"><span>George &amp; Dragon · Marlow · Heartwood Collection</span>'
+            '<span>Five weeks. Lasting habits. · Questions to Harry</span></footer>',
+            unsafe_allow_html=True)
