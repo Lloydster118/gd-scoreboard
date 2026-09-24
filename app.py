@@ -428,6 +428,11 @@ with tabs[4]:
                                           settlement_confirmed=settled, preorder=preorder,
                                           preorder_targets_confirmed=targets_ok, exclude=excluded, no_main_confirmed=no_main,
                                           reviewed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                            # Do not silently drop audited transfer provenance when
+                            # editing another field. Changed linked bills stay held.
+                            for field in ("transfer_only", "linked_fingerprints"):
+                                if field in previous:
+                                    review[field] = copy.deepcopy(previous[field])
                             if selected_owner != "Use automatic ownership":
                                 review["owner"] = selected_owner
                             if final_text.strip():

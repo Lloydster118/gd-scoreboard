@@ -26,6 +26,7 @@ REQUIRED_COLS = {
 STORED_COLS = sorted(REQUIRED_COLS | {"Payment Amount"})
 SAFE_TYPES = {"Sale", "Payment", "Discount", "Correcte d Discount"}
 SALE_FIELDS = ["Date", "Employee", "Description", "Quantity", "Sales Amount"]
+INCOMING_TYPES = {"Item moved - to account", "Merged - to account", "Table split - to account"}
 EXCLUDED_OWNER = "(outside competition roster)"
 
 
@@ -131,15 +132,23 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
     roster = ELIGIBLE_ROSTER if roster is None else roster
     accounts, credits, unknown = [], [], []
     for account_id, account in raw.groupby("Account ID", sort=False):
+        supplied = reviews.get(str(account_id), {})
         original = account[(account["Type"] == "Sale") & (account["Quantity"] > 0)]
-        original = original[~original["Description"].map(is_staff_food)]
-        if original.empty:
+        original = original.loc[~original["Description"].map(is_staff_food).astype(bool)]
+        # Opt-in only: an audited transfer destination may have no Sale rows.
+        # Incoming operators are not automatically treated as original sellers.
+        transfer_only = original.empty and supplied.get("transfer_only") is True
+        activity = original
+        if transfer_only:
+            activity = account[account["Type"].isin(INCOMING_TYPES) & account["Quantity"].gt(0)]
+            activity = activity.loc[~activity["Description"].map(is_staff_food).astype(bool)]
+        if activity.empty:
             continue
-        day = original["Date"].min()
+        day = activity["Date"].min()
         if not any(w.start <= day <= w.end for w in WEEKS):
             continue
-        tables = sorted(set(original["Table"]) - {"", "nan", "None"})
-        covers_values = set(original.loc[original["Covers"] > 0, "Covers"])
+        tables = sorted(set(activity["Table"]) - {"", "nan", "None"})
+        covers_values = set(activity.loc[activity["Covers"] > 0, "Covers"])
         covers = max(covers_values, default=0)
         if not tables or covers <= 0:
             # A till default is not proof that no dining visit happened.
@@ -147,13 +156,18 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             has_main = any(
                 (mapping := menu_on(r["Date"], menus)) is not None
                 and r["Description"] in mapping["mains"]
-                for _, r in original.iterrows()
+                for _, r in activity.iterrows()
             )
             if not has_main:
                 continue
         fp = fingerprint(account)
-        supplied = reviews.get(str(account_id), {})
         review = supplied if supplied.get("fingerprint") == fp and supplied.get("note", "").strip() else {}
+        if review and any(
+            raw[raw["Account ID"].eq(linked_id)].empty
+            or fingerprint(raw[raw["Account ID"].eq(linked_id)]) != expected
+            for linked_id, expected in review.get("linked_fingerprints", {}).items()
+        ):
+            review = {}
         issues, blockers, data_notes = [], [], []
         if supplied and not review:
             issues.append("Review expired: account changed or note missing")
@@ -188,10 +202,12 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             if relevant or financial_reversal:
                 correction = True
         final_sales = _reviewed_sales(review, account) if review else None
+        if transfer_only and final_sales is None:
+            blockers.append("Transfer-only account: verified original sellers and final sales required")
         if correction and final_sales is None:
             blockers.append("Corrections/transfers: verified final sales required")
         sales = original[SALE_FIELDS].copy() if final_sales is None else final_sales.copy()
-        sales = sales[~sales["Description"].map(is_staff_food)]
+        sales = sales.loc[~sales["Description"].map(is_staff_food).astype(bool)]
         owner_weights = {}
         missing_menu = False
         for _, row in sales.iterrows():
@@ -311,6 +327,8 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             # Preserve whole accounts and fingerprints, including cross-week
             # exceptions. A partial account must never become a valid visit.
             first_days = raw[raw["Type"].eq("Sale") & raw["Quantity"].gt(0)].groupby("Account ID")["Date"].min()
+            transferred = result.accounts.set_index("account_id")["Date"]
+            first_days = first_days.combine_first(transferred)
             ids = first_days[first_days.between(theme.start, WEEKS[-1].end)].index
             subset = raw[raw["Account ID"].isin(ids)]
             if not subset.empty:
