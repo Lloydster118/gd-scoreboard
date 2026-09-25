@@ -250,3 +250,17 @@ system appearance options do not change scoring, storage or review decisions.
 The design regression suite covers HTML escaping, fractional opportunities,
 unavailable scores, tied overall ranks and theme tokens. Responsive browser QA
 uses an isolated synthetic fixture without production credentials or staff data.
+
+## Reviewed transfer-only bills
+
+A paid destination may contain only incoming transfer rows and no `Sale` rows.
+An audited review can opt it in using `transfer_only: true` and a complete
+`final_sales` list preserving the original sellers. Incoming till operators are
+never automatically substituted for sellers. Exclude matched empty source and
+intermediate accounts explicitly so the visit counts once.
+
+Use `linked_fingerprints: {"source-account-id": "fingerprint"}` on each linked
+review to expire it if any source or destination changes or disappears. Expired
+transfer reviews remain visible and held; payment and menu checks still apply.
+Both weekly and ongoing category calculations include reviewed destinations.
+Admin edits preserve transfer provenance rather than silently removing it.

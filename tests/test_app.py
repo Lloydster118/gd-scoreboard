@@ -17,6 +17,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppTests(unittest.TestCase):
+    def test_edit_transfer_review_preserves_provenance(self):
+        from test_reviewed_transfers import ReviewedTransferTests
+        rows, reviews = ReviewedTransferTests().fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalStore(Path(directory) / "state.gz")
+            state, _ = replacement_state(empty_state(), pd.DataFrame(rows).to_csv(index=False).encode())
+            state["reviews"] = reviews
+            store.save(state, None)
+            with patch("src.storage.LocalStore", return_value=store):
+                app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
+                app.secrets = {"admin_pin": "synthetic-secret", "storage": {"development_local": True}}
+                app.run()
+                app.text_input[0].set_value("synthetic-secret")
+                next(b for b in app.button if b.label == "Unlock admin").click().run()
+                next(s for s in app.selectbox if s.label == "Account to inspect or correct").select("dest").run()
+                next(b for b in app.button if b.label == "Save reviewed account").click().run()
+                self.assertEqual(len(app.exception), 0)
+                saved = store.load()[0]["reviews"]["dest"]
+                self.assertTrue(saved["transfer_only"])
+                self.assertEqual(saved["linked_fingerprints"], reviews["dest"]["linked_fingerprints"])
+
     def test_admin_can_freeze_completed_week_and_public_result_persists(self):
         with tempfile.TemporaryDirectory() as directory:
             store = LocalStore(Path(directory) / "state.gz")
