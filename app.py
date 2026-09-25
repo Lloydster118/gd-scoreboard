@@ -400,6 +400,10 @@ with tabs[4]:
                     account = raw[raw["Account ID"].eq(account_id)]
                     st.dataframe(account, hide_index=True, use_container_width=True)
                     previous = state["reviews"].get(str(account_id), {})
+                    if previous.get("shared_owners"):
+                        st.caption("Reviewed equal-share serving owners: " +
+                                   ", ".join(previous["shared_owners"]) +
+                                   ". Item points remain with their sellers.")
                     owner_options = ["Use automatic ownership", EXCLUDED_OWNER] + sorted(set(ELIGIBLE_ROSTER.values()))
                     selected_owner = st.selectbox("Confirmed owner", owner_options,
                                                   index=owner_options.index(previous.get("owner", "Use automatic ownership")),
@@ -430,10 +434,12 @@ with tabs[4]:
                                           reviewed_at=dt.datetime.now(dt.timezone.utc).isoformat())
                             # Do not silently drop audited transfer provenance when
                             # editing another field. Changed linked bills stay held.
-                            for field in ("transfer_only", "linked_fingerprints"):
+                            for field in ("transfer_only", "linked_fingerprints", "shared_owners"):
                                 if field in previous:
                                     review[field] = copy.deepcopy(previous[field])
                             if selected_owner != "Use automatic ownership":
+                                if review.get("shared_owners"):
+                                    raise ValueError("This account has reviewed shared owners; do not replace them with a single owner without a new ownership review.")
                                 review["owner"] = selected_owner
                             if final_text.strip():
                                 review["final_sales"] = json.loads(final_text)

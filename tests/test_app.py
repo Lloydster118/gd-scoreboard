@@ -17,6 +17,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppTests(unittest.TestCase):
+    def test_edit_shared_review_preserves_owner_allocation(self):
+        from src.processing import fingerprint, load_transactions
+        rows = [row(employee="Server One"), row(employee="Server Two"), paid()]
+        csv = pd.DataFrame(rows).to_csv(index=False).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalStore(Path(directory) / "state.gz")
+            state, _ = replacement_state(empty_state(), csv)
+            state["reviews"]["0001"] = {
+                "fingerprint": fingerprint(load_transactions(csv)),
+                "note": "Approved shared service",
+                "shared_owners": ["Server 1", "Server 2"],
+            }
+            store.save(state, None)
+            with patch("src.storage.LocalStore", return_value=store):
+                app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30)
+                app.secrets = {"admin_pin": "synthetic-secret", "storage": {"development_local": True}}
+                app.run()
+                app.text_input[0].set_value("synthetic-secret")
+                next(b for b in app.button if b.label == "Unlock admin").click().run()
+                next(b for b in app.button if b.label == "Save reviewed account").click().run()
+                self.assertEqual(len(app.exception), 0)
+                self.assertEqual(store.load()[0]["reviews"]["0001"]["shared_owners"],
+                                 ["Server 1", "Server 2"])
+
     def test_edit_transfer_review_preserves_provenance(self):
         from test_reviewed_transfers import ReviewedTransferTests
         rows, reviews = ReviewedTransferTests().fixture()
