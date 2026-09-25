@@ -1,4 +1,4 @@
-# Deployment environment revision: heartwood-presentation-v1 (2026-09-21).
-# Refresh the Streamlit process when introducing new presentation-module exports.
+# Deployment environment revision: reviewed-shared-ownership-v1 (2026-09-25).
+# Force a clean Streamlit process for the transfer and shared-owner scoring modules.
 streamlit>=1.36,<2
 pandas>=2.2,<3
