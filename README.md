@@ -264,3 +264,16 @@ review to expire it if any source or destination changes or disappears. Expired
 transfer reviews remain visible and held; payment and menu checks still apply.
 Both weekly and ongoing category calculations include reviewed destinations.
 Admin edits preserve transfer provenance rather than silently removing it.
+
+## Explicit shared serving ownership
+
+A fingerprinted managerial review may set `shared_owners` to two or more
+distinct canonical roster identities or exact recorded outside-roster identities
+(`(outside competition roster): Employee Name`). This is an explicit decision,
+not automatic tie-breaking. Do not combine it with a single `owner` override.
+
+One opportunity is divided equally across the union of reviewed serving owners
+and qualifying item sellers for that category. An owner who also sells an item
+is included once. Item portions stay entirely with their actual sellers; outside
+roster shares are not redistributed. Settlement, main-course, correction, menu
+and review-expiry checks still apply. Admin edits preserve the shared allocation.

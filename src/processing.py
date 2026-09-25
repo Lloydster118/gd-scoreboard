@@ -175,7 +175,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             accounts.append(dict(account_id=account_id, Date=day, table=", ".join(tables),
                                  covers=covers, owner=None, counted=False, credit_allowed=False,
                                  issues="", fingerprint=fp, data_notes="Excluded by review",
-                                 owner_identity=None))
+                                 owner_identity=None, owner_participants=()))
             continue
         settled = (account["Type"].eq("Payment") & account["Payment Amount"].gt(0)).any()
         deposit = (account["Type"].eq("Ledger") & account["Description"].eq("Deposit Red")
@@ -263,18 +263,38 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             issues.append("Multiple table numbers: ownership needs review")
             owner = None
         override = review.get("owner")
+        shared = review.get("shared_owners")
+        if shared is not None:
+            if (not isinstance(shared, list) or len(shared) < 2
+                    or not all(isinstance(x, str) and x.strip() for x in shared)
+                    or len(set(shared)) != len(shared)):
+                raise ValueError("Shared owners must be at least two distinct identities.")
+            identities = set(roster.values()) | {
+                EXCLUDED_OWNER + ": " + employee
+                for employee in raw["Employee"].unique() if employee not in roster
+            }
+            if not set(shared).issubset(identities):
+                raise ValueError("Shared owner is not a roster member or recorded outside-roster employee.")
+            if override:
+                raise ValueError("Choose either one reviewed owner or shared owners, not both.")
+            if not owner_weights:
+                blockers.append("Shared ownership requires recognised main-course evidence")
+            else:
+                owner = "Shared: " + " / ".join(shared)
+                issues = [x for x in issues if x.startswith("Review expired")]
         if override:
             if override not in set(roster.values()) | {EXCLUDED_OWNER}:
                 raise ValueError("Reviewed owner is not in the current roster.")
             owner = override
             issues = [x for x in issues if x.startswith("Review expired")]
         owner_identity = owner
+        owner_participants = tuple(shared) if shared and owner_weights else ((owner,) if owner else ())
         if owner and owner.startswith(EXCLUDED_OWNER):
             owner = EXCLUDED_OWNER
         if owner is None:
             issues.append("Owner unresolved; denominator held")
         if review.get("no_main_confirmed"):
-            if owner_weights or override or preorder:
+            if owner_weights or override or shared or preorder:
                 blockers.append("No-main review conflicts with recognised main ownership; review again")
             else:
                 issues = [x for x in issues if x not in (
@@ -313,11 +333,11 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
                              covers=covers, owner=owner, counted=bool(owner) and not blockers,
                              credit_allowed=credit_allowed, issues="; ".join(dict.fromkeys(issues)),
                              fingerprint=fp, data_notes="; ".join(data_notes),
-                             owner_identity=owner_identity))
+                             owner_identity=owner_identity, owner_participants=owner_participants))
     result = ScoringResult(
         pd.DataFrame(accounts, columns=["account_id", "Date", "table", "covers", "owner",
                                        "counted", "credit_allowed", "issues", "fingerprint", "data_notes",
-                                       "owner_identity"]),
+                                       "owner_identity", "owner_participants"]),
         pd.DataFrame(credits, columns=["account_id", "Date", "week", "Display",
                                       "target_units", "target_revenue"]),
         pd.DataFrame(unknown, columns=["Date", "Description", "reason"]).drop_duplicates(),
@@ -349,7 +369,8 @@ def weekly_leaderboard(result, week, roster=None, competitors=None, *, period_en
     sellers = units.groupby("account_id")["Display"].agg(set).to_dict()
     for account in accounts[accounts["counted"]].itertuples():
         identity = getattr(account, "owner_identity", account.owner)
-        participants = sellers.get(account.account_id, set()) | {identity}
+        owners = getattr(account, "owner_participants", ()) or (identity,)
+        participants = sellers.get(account.account_id, set()) | set(owners)
         share = 1.0 / len(participants)
         for person in participants:
             opportunities[person] = opportunities.get(person, 0.0) + share
