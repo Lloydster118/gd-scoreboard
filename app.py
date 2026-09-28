@@ -208,6 +208,9 @@ with tabs[1]:
     for week in WEEKS:
         st.subheader(f"Week {week.number}: {week.name}")
         st.caption(f"{week.start:%d %b} to {week.end:%d %b}")
+        if week.number == 3:
+            st.caption("Paid extra sides, steak sauces/butters, burger toppings and extra roast meat. "
+                       "Included sides and zero-priced modifiers do not earn points.")
         if today < week.start:
             st.info(f"Locked until {week.start:%A %d %B}.")
             continue
@@ -238,6 +241,9 @@ with tabs[2]:
   whether they are the second course or the third after a starter. Standalone starters/desserts do not qualify.
 - **Package guests count too:** Qualifying courses actually ordered count, including zero-priced or included
   resident-package courses. A package charge or allowance alone earns no portion credit.
+- **Week 3 paid extras:** Mapped sides, steak sauces/butters, burger toppings and extra roast meat count only
+  when separately charged (positive item sales amount). Included sides, free sauces and zero-price modifiers
+  do not qualify. This paid-only rule does not change nibble or starter scoring.
 - **Reward the outcome:** Orders count whether the guest was prompted or already intended to order them.
   There is no persuasion test or team-average adjustment to prize scores.
 - **Credit follows the sale entry:** You retain credit for qualifying portions you enter on someone else's account.

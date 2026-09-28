@@ -320,6 +320,11 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
                 # Zero-priced included courses are eligible actual portions.
                 if week.number in (2, 4) and not owner_weights:
                     continue
+                # Sides/upgrades reward separately charged extras, never included
+                # accompaniments or zero-priced modifiers. Other categories keep
+                # their existing resident-package/complimentary course rules.
+                if week.number == 3 and row["Sales Amount"] <= 0:
+                    continue
                 if preorder and week.number > 1 and not review.get("preorder_targets_confirmed"):
                     issues.append("Preselected courses: target eligibility needs review")
                     continue
