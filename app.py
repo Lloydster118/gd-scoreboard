@@ -30,6 +30,7 @@ from src.storage import (
 from src.presentation import (
     stylesheet, masthead, hero, weekly_cards, overall_cards, campaign_path, empty_card,
 )
+from src.runtime import saved_snapshot, scored_snapshot
 
 st.set_page_config(page_title="G&D · Team Scoreboard",
                    page_icon=str(Path(__file__).parent / "assets" / "favicon.png"), layout="wide")
@@ -97,6 +98,7 @@ def save_state(new_state, message):
             score_accounts(load_transactions(new_state["csv"].encode()),
                            new_state["menus"], new_state["reviews"], candidate_roster)
         store.save(new_state, version)
+        saved_snapshot.clear()
     except Exception as exc:
         st.error(f"Not saved: {exc}")
         return
@@ -109,7 +111,7 @@ state, version = empty_state(), None
 load_error = None
 if store:
     try:
-        state, version = store.load()
+        state, version = (saved_snapshot(store.repo, store.token) if durable else store.load())
     except Exception:
         load_error = "The saved snapshot could not be loaded. Rankings and editing are paused; check private storage."
 
@@ -120,10 +122,10 @@ if not load_error:
         ELIGIBLE_ROSTER, COMPETITORS = with_additions(
             ELIGIBLE_ROSTER, COMPETITORS, state.get("roster_additions", []))
         if state["csv"]:
-            raw = load_transactions(state["csv"].encode())
+            raw, result = scored_snapshot(state["csv"], state["menus"], state["reviews"], ELIGIBLE_ROSTER)
         elif legacy_path.exists():
             raw = load_transactions(legacy_path)
-        if raw is not None:
+        if raw is not None and result is None:
             result = score_accounts(raw, state["menus"], state["reviews"], ELIGIBLE_ROSTER)
     except Exception:
         load_error = "Saved data or review configuration is invalid. Rankings are paused; check the admin configuration."
@@ -140,6 +142,9 @@ if state["upload"]:
     uploaded_at = dt.datetime.fromisoformat(meta["at"]).astimezone(ZoneInfo("Europe/London"))
     st.caption(f"Data coverage: {meta['start']} to {meta['end']} · "
                f"Updated: {uploaded_at:%d %b %Y, %H:%M %Z} · {meta['rows']:,} transaction rows")
+    if st.button("Refresh saved data", help="Reload private storage now. Otherwise updates are checked on interactions at most once a minute."):
+        saved_snapshot.clear()
+        st.rerun()
 elif raw is not None:
     st.warning("Legacy temporary data loaded for preview only. Re-upload the full cumulative export into private storage.")
 if result is not None:
