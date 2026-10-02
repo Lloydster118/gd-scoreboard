@@ -126,15 +126,32 @@ def _reviewed_sales(review, account):
     return result
 
 
-def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
+def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _memo=None):
     menus = validate_menus(DEFAULT_MENUS if menus is None else menus)
     reviews = reviews or {}
     roster = ELIGIBLE_ROSTER if roster is None else roster
+    # Category passes retain whole accounts. Reuse immutable account work within
+    # this call, but never across different inputs or separate scoring calls.
+    memo = _memo if _memo is not None else {"fingerprints": {}, "original": {}, "menus": {}}
+    groups = dict(tuple(raw.groupby("Account ID", sort=False)))
+
+    def account_fingerprint(aid):
+        if aid not in memo["fingerprints"]:
+            memo["fingerprints"][aid] = fingerprint(groups[aid])
+        return memo["fingerprints"][aid]
+
+    def dated_menu(day):
+        if day not in memo["menus"]:
+            memo["menus"][day] = menu_on(day, menus)
+        return memo["menus"][day]
+
     accounts, credits, unknown = [], [], []
-    for account_id, account in raw.groupby("Account ID", sort=False):
+    for account_id, account in groups.items():
         supplied = reviews.get(str(account_id), {})
-        original = account[(account["Type"] == "Sale") & (account["Quantity"] > 0)]
-        original = original.loc[~original["Description"].map(is_staff_food).astype(bool)]
+        if account_id not in memo["original"]:
+            original = account[(account["Type"] == "Sale") & (account["Quantity"] > 0)]
+            memo["original"][account_id] = original.loc[~original["Description"].map(is_staff_food).astype(bool)]
+        original = memo["original"][account_id]
         # Opt-in only: an audited transfer destination may have no Sale rows.
         # Incoming operators are not automatically treated as original sellers.
         transfer_only = original.empty and supplied.get("transfer_only") is True
@@ -154,17 +171,17 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
             # A till default is not proof that no dining visit happened.
             # Keep otherwise identifiable main-course accounts in the audit.
             has_main = any(
-                (mapping := menu_on(r["Date"], menus)) is not None
+                (mapping := dated_menu(r["Date"])) is not None
                 and r["Description"] in mapping["mains"]
-                for _, r in activity.iterrows()
+                for r in activity.to_dict("records")
             )
             if not has_main:
                 continue
-        fp = fingerprint(account)
+        fp = account_fingerprint(account_id)
         review = supplied if supplied.get("fingerprint") == fp and supplied.get("note", "").strip() else {}
         if review and any(
-            raw[raw["Account ID"].eq(linked_id)].empty
-            or fingerprint(raw[raw["Account ID"].eq(linked_id)]) != expected
+            linked_id not in groups
+            or account_fingerprint(linked_id) != expected
             for linked_id, expected in review.get("linked_fingerprints", {}).items()
         ):
             review = {}
@@ -188,12 +205,12 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         # A drink/dessert movement must not discard otherwise valid food sales.
         # Refund/reversal evidence still requires conservative settlement review.
         correction = False
-        for _, row in account.iterrows():
+        for row in account.to_dict("records"):
             if row["Type"] in SAFE_TYPES and not (row["Type"] == "Sale" and row["Quantity"] < 0):
                 continue
             if is_staff_food(row["Description"]):
                 continue
-            menu = menu_on(row["Date"], menus)
+            menu = dated_menu(row["Date"])
             week = (WEEKS[category - 1] if category else
                     next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None))
             relevant = bool(menu and (row["Description"] in menu["mains"] or
@@ -210,8 +227,9 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         sales = sales.loc[~sales["Description"].map(is_staff_food).astype(bool)]
         owner_weights = {}
         missing_menu = False
-        for _, row in sales.iterrows():
-            menu = menu_on(row["Date"], menus)
+        sale_records = sales.to_dict("records")
+        for row in sale_records:
+            menu = dated_menu(row["Date"])
             if menu is None:
                 missing_menu = True
                 unknown.append(dict(Date=row["Date"], Description=row["Description"], reason="No confirmed menu"))
@@ -228,7 +246,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         for sale_day in set(sales["Date"]):
             active = (WEEKS[category - 1] if category else
                       next((w for w in WEEKS if w.start <= sale_day <= w.end), None))
-            mapping = menu_on(sale_day, menus)
+            mapping = dated_menu(sale_day)
             if active and mapping and str(active.number) not in mapping["targets"]:
                 blockers.append(f"Week {active.number} targets not confirmed")
         sale_weeks = {w.number for w in WEEKS if sales["Date"].between(w.start, w.end).any()}
@@ -305,10 +323,10 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         issues.extend(blockers)
         credit_allowed = not blockers
         if credit_allowed:
-            for _, row in sales.iterrows():
+            for row in sale_records:
                 week = (WEEKS[category - 1] if category else
                         next((w for w in WEEKS if w.start <= row["Date"] <= w.end), None))
-                menu = menu_on(row["Date"], menus)
+                menu = dated_menu(row["Date"])
                 if week is None or menu is None:
                     continue
                 if str(week.number) not in menu["targets"]:
@@ -348,17 +366,17 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None):
         pd.DataFrame(unknown, columns=["Date", "Description", "reason"]).drop_duplicates(),
     )
     if category is None and not raw.empty:
+        first_days = raw[raw["Type"].eq("Sale") & raw["Quantity"].gt(0)].groupby("Account ID")["Date"].min()
+        transferred = result.accounts.set_index("account_id")["Date"]
+        first_days = first_days.combine_first(transferred)
         for theme in WEEKS:
             # Preserve whole accounts and fingerprints, including cross-week
             # exceptions. A partial account must never become a valid visit.
-            first_days = raw[raw["Type"].eq("Sale") & raw["Quantity"].gt(0)].groupby("Account ID")["Date"].min()
-            transferred = result.accounts.set_index("account_id")["Date"]
-            first_days = first_days.combine_first(transferred)
             ids = first_days[first_days.between(theme.start, WEEKS[-1].end)].index
             subset = raw[raw["Account ID"].isin(ids)]
             if not subset.empty:
                 result.categories[theme.number] = score_accounts(
-                    subset, menus, reviews, roster, category=theme.number)
+                    subset, menus, reviews, roster, category=theme.number, _memo=memo)
     return result
 
 
