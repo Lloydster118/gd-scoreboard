@@ -133,12 +133,38 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
     # Category passes retain whole accounts. Reuse immutable account work within
     # this call, but never across different inputs or separate scoring calls.
     memo = _memo if _memo is not None else {"fingerprints": {}, "original": {}, "menus": {}}
+    for key in ("records", "sale_records", "sales"):
+        memo.setdefault(key, {})
     groups = dict(tuple(raw.groupby("Account ID", sort=False)))
+
+    # Stringify the stored columns once. Per-account conversion is the slowest part
+    # of scoring; the digest is identical to fingerprint() on the same rows.
+    if "stored" not in memo:
+        stored = raw[STORED_COLS].astype(str)
+        memo["stored"] = {aid: frame.values.tolist()
+                          for aid, frame in stored.groupby(raw["Account ID"], sort=False)}
 
     def account_fingerprint(aid):
         if aid not in memo["fingerprints"]:
-            memo["fingerprints"][aid] = fingerprint(groups[aid])
+            records = [dict(zip(STORED_COLS, values)) for values in memo["stored"][aid]]
+            lines = sorted(json.dumps(r, sort_keys=True) for r in records)
+            memo["fingerprints"][aid] = hashlib.sha256("\n".join(lines).encode()).hexdigest()
         return memo["fingerprints"][aid]
+
+    def original_sales(aid):
+        # One vectorised pass for every account, instead of filtering each one.
+        if "original_groups" not in memo:
+            sold = raw[(raw["Type"] == "Sale") & (raw["Quantity"] > 0)]
+            sold = sold.loc[~sold["Description"].map(is_staff_food).astype(bool)]
+            memo["original_groups"] = dict(tuple(sold.groupby("Account ID", sort=False)))
+            memo["sale_field_groups"] = dict(tuple(sold[SALE_FIELDS].groupby(sold["Account ID"], sort=False)))
+            memo["no_sales"] = raw.iloc[:0]
+        return memo["original_groups"].get(aid, memo["no_sales"])
+
+    def account_records(aid, account):
+        if aid not in memo["records"]:
+            memo["records"][aid] = account.to_dict("records")
+        return memo["records"][aid]
 
     def dated_menu(day):
         if day not in memo["menus"]:
@@ -148,10 +174,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
     accounts, credits, unknown = [], [], []
     for account_id, account in groups.items():
         supplied = reviews.get(str(account_id), {})
-        if account_id not in memo["original"]:
-            original = account[(account["Type"] == "Sale") & (account["Quantity"] > 0)]
-            memo["original"][account_id] = original.loc[~original["Description"].map(is_staff_food).astype(bool)]
-        original = memo["original"][account_id]
+        original = original_sales(account_id)
         # Opt-in only: an audited transfer destination may have no Sale rows.
         # Incoming operators are not automatically treated as original sellers.
         transfer_only = original.empty and supplied.get("transfer_only") is True
@@ -165,7 +188,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
         if not any(w.start <= day <= w.end for w in WEEKS):
             continue
         tables = sorted(set(activity["Table"]) - {"", "nan", "None"})
-        covers_values = set(activity.loc[activity["Covers"] > 0, "Covers"])
+        covers_values = {c for c in activity["Covers"].tolist() if c > 0}
         covers = max(covers_values, default=0)
         if not tables or covers <= 0:
             # A till default is not proof that no dining visit happened.
@@ -205,7 +228,7 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
         # A drink/dessert movement must not discard otherwise valid food sales.
         # Refund/reversal evidence still requires conservative settlement review.
         correction = False
-        for row in account.to_dict("records"):
+        for row in account_records(account_id, account):
             if row["Type"] in SAFE_TYPES and not (row["Type"] == "Sale" and row["Quantity"] < 0):
                 continue
             if is_staff_food(row["Description"]):
@@ -223,11 +246,23 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
             blockers.append("Transfer-only account: verified original sellers and final sales required")
         if correction and final_sales is None:
             blockers.append("Corrections/transfers: verified final sales required")
-        sales = original[SALE_FIELDS].copy() if final_sales is None else final_sales.copy()
-        sales = sales.loc[~sales["Description"].map(is_staff_food).astype(bool)]
+        if final_sales is None:
+            # Read-only from here on, so identical across category passes.
+            if account_id not in memo["sales"]:
+                # `original` is already staff-food filtered; keep only the sale fields.
+                memo["sales"][account_id] = memo["sale_field_groups"].get(account_id, memo["no_sales"][SALE_FIELDS])
+            sales = memo["sales"][account_id]
+        else:
+            sales = final_sales.copy()
+            sales = sales.loc[~sales["Description"].map(is_staff_food).astype(bool)]
         owner_weights = {}
         missing_menu = False
-        sale_records = sales.to_dict("records")
+        if final_sales is None:
+            if account_id not in memo["sale_records"]:
+                memo["sale_records"][account_id] = sales.to_dict("records")
+            sale_records = memo["sale_records"][account_id]
+        else:
+            sale_records = sales.to_dict("records")
         for row in sale_records:
             menu = dated_menu(row["Date"])
             if menu is None:

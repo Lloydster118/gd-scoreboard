@@ -31,6 +31,7 @@ from src.presentation import (
     stylesheet, masthead, hero, weekly_cards, overall_cards, campaign_path, empty_card,
 )
 from src.runtime import saved_snapshot, scored_snapshot
+from src import progress
 
 st.set_page_config(page_title="G&D · Team Scoreboard",
                    page_icon=str(Path(__file__).parent / "assets" / "favicon.png"), layout="wide")
@@ -206,6 +207,46 @@ with tabs[0]:
                     show_board(category_leaderboard(result, week, ELIGIBLE_ROSTER, COMPETITORS))
 
 with tabs[1]:
+    if result is not None and not load_error and raw is not None and not raw.empty:
+        try:
+            snapshots = progress.build_snapshots(result, ELIGIBLE_ROSTER, COMPETITORS, raw["Date"].max())
+        except Exception:
+            snapshots = []
+            st.caption("The points progress view is unavailable right now.")
+        if snapshots:
+            st.subheader("The £50 race: how your points move")
+            st.caption("Each category is re-ranked as sales come in, so a strong table in an earlier "
+                       "category can still lift you. Bracketed numbers show the change since the previous "
+                       f"snapshot ({snapshots[-2].label.lower()}, {snapshots[-2].cutoff:%d %b})."
+                       if len(snapshots) > 1 else
+                       "Each category is re-ranked as sales come in, so a strong table in an earlier "
+                       "category can still lift you.")
+            st.dataframe(progress.grid(snapshots), hide_index=True, use_container_width=True)
+            st.caption("Points are out of 20 per category and 100 overall. 1st earns 20, 2nd 17.5, "
+                       "3rd 15, and so on. A big table moves your rate straight away, but points only "
+                       "change when it lifts you past someone.")
+            with st.expander("Overall score after each week"):
+                st.dataframe(progress.history(snapshots), hide_index=True, use_container_width=True)
+                st.caption("Past snapshots re-rank the data using today's reviews, so they can differ "
+                           "slightly from what the site showed at the time.")
+            with st.expander("Place and rate in each category, week by week"):
+                for week in WEEKS:
+                    if week.number in snapshots[-1].boards:
+                        st.markdown(f"**{progress.SHORT_NAMES[week.number]}** · place · portions per 100 tables")
+                        st.dataframe(progress.category_path(snapshots, week.number),
+                                     hide_index=True, use_container_width=True)
+            with st.expander("Your numbers: place, gap to the next step and biggest tables", expanded=False):
+                names = [n for n in progress.points_table(snapshots[-1]).index]
+                if names:
+                    person = st.selectbox("Server", names, key="progress_person")
+                    st.dataframe(progress.person_view(snapshots, result, person),
+                                 hide_index=True, use_container_width=True)
+                    st.caption("Next step assumes the same number of tables and no change for anyone else.")
+                    best = progress.best_tables(result, person)
+                    if not best.empty:
+                        st.markdown("**Biggest single tables**")
+                        st.dataframe(best, hide_index=True, use_container_width=True)
+        st.divider()
     st.subheader("Five weeks. One growing habit.")
     st.markdown(campaign_path(WEEKS, today), unsafe_allow_html=True)
     st.caption("Each weekly £10 result is separate. Every launched category continues counting "
