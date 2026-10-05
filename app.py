@@ -32,6 +32,9 @@ from src.presentation import (
 )
 from src.runtime import saved_snapshot, scored_snapshot
 from src import progress
+from src import processing as _processing
+
+SCORING_REVISION = "2026-10-05-paid-extras-memo"
 
 st.set_page_config(page_title="G&D · Team Scoreboard",
                    page_icon=str(Path(__file__).parent / "assets" / "favicon.png"), layout="wide")
@@ -152,6 +155,10 @@ if result is not None:
     review_count = int(result.accounts["issues"].ne("").sum())
     if review_count:
         st.warning(f"Provisional: {review_count} accounts need admin review. Held or unresolved accounts can change rankings; do not award prizes yet.")
+
+if getattr(_processing, "SCORING_REVISION", None) != SCORING_REVISION:
+    st.error("Scoring code on this server is out of date, so ongoing category boards may be wrong. "
+             "Reboot the app from Streamlit settings before relying on them. Frozen weekly results are unaffected.")
 
 tabs = st.tabs(["Leaderboard", "5-Week View", "Rules", "How It Works", "Admin"])
 with tabs[0]:
