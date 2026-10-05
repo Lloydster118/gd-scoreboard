@@ -29,6 +29,8 @@ SALE_FIELDS = ["Date", "Employee", "Description", "Quantity", "Sales Amount"]
 INCOMING_TYPES = {"Item moved - to account", "Merged - to account", "Table split - to account"}
 EXCLUDED_OWNER = "(outside competition roster)"
 
+SCORING_REVISION = "2026-10-05-paid-extras-memo"  # bump with scoring changes; app.py checks it
+
 
 def load_transactions(source):
     if isinstance(source, bytes):
