@@ -315,7 +315,8 @@ class ScoringTests(unittest.TestCase):
 
     def test_additional_courses_require_main_not_package_or_owner_override(self):
         for number, day, target in [(2, "21/09/2026", "Test Starter"),
-                                     (4, "05/10/2026", "Test Dessert")]:
+                                     (4, "05/10/2026", "Test Dessert"),
+                                     (5, "12/10/2026", "Test After Dinner")]:
             menus = [{"name": "Synthetic course test", "start": "2026-09-14", "end": "2026-10-18",
                       "mains": {"Burger & Fries": 1},
                       "targets": {str(n): [] for n in range(1, 6)}}]
@@ -332,7 +333,8 @@ class ScoringTests(unittest.TestCase):
 
     def test_package_courses_count_at_zero_price_with_main_and_shared_seller(self):
         for number, day, target in [(2, "21/09/2026", "Test Starter"),
-                                     (4, "05/10/2026", "Test Dessert")]:
+                                     (4, "05/10/2026", "Test Dessert"),
+                                     (5, "12/10/2026", "Test After Dinner")]:
             menus = [{"name": "Synthetic course test", "start": "2026-09-14", "end": "2026-10-18",
                       "mains": {"Burger & Fries": 1},
                       "targets": {str(n): [] for n in range(1, 6)}}]

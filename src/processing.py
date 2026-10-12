@@ -29,7 +29,7 @@ SALE_FIELDS = ["Date", "Employee", "Description", "Quantity", "Sales Amount"]
 INCOMING_TYPES = {"Item moved - to account", "Merged - to account", "Table split - to account"}
 EXCLUDED_OWNER = "(outside competition roster)"
 
-SCORING_REVISION = "2026-10-05-paid-extras-memo"  # bump with scoring changes; app.py checks it
+SCORING_REVISION = "2026-10-12-after-dinner-needs-main"  # bump with scoring changes; app.py checks it
 
 
 def load_transactions(source):
@@ -369,11 +369,11 @@ def score_accounts(raw, menus=None, reviews=None, roster=None, category=None, _m
                 if str(week.number) not in menu["targets"]:
                     issues.append(f"Week {week.number} targets not confirmed")
                     continue
-                # Starters and desserts reward an additional course with a
+                # Starters, desserts and after-dinner items reward an additional course with a
                 # recognised main, not standalone snacks/sweets. Owner overrides
                 # and package charges alone are not main-course evidence.
                 # Zero-priced included courses are eligible actual portions.
-                if week.number in (2, 4) and not owner_weights:
+                if week.number in (2, 4, 5) and not owner_weights:
                     continue
                 # Sides/upgrades reward separately charged extras, never included
                 # accompaniments or zero-priced modifiers. Other categories keep

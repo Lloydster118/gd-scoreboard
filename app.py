@@ -34,7 +34,7 @@ from src.runtime import saved_snapshot, scored_snapshot
 from src import progress
 from src import processing as _processing
 
-SCORING_REVISION = "2026-10-05-paid-extras-memo"
+SCORING_REVISION = "2026-10-12-after-dinner-needs-main"
 
 st.set_page_config(page_title="G&D · Team Scoreboard",
                    page_icon=str(Path(__file__).parent / "assets" / "favicon.png"), layout="wide")
